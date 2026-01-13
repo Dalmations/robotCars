@@ -1,0 +1,45 @@
+flowchart TD
+    A([Start / Power On]) --> B[Receive child's voice command]
+    B --> C[Speech Processing Algorithm<br/>• Wake word / push-to-talk<br/>• Noise reduction<br/>• ASR + confidence scoring<br/>• Intent + parameters]
+    C --> D{Speech recognized<br/>with sufficient confidence?}
+    D -- No --> B2[Request repeat / provide feedback<br/>Try again] --> B
+    D -- Yes --> E[Bucketing Algorithm<br/>Choose path / scenario bucket<br/>based on intent + therapy rules]
+
+    %% --- MAIN CONTROL LOOP ---
+    E --> L{{Main Control Loop<br/>repeat until all cars reach assigned points}}
+
+    %% --- CURRENT LOCATION ---
+    L --> F[Current Location Algorithm<br/>• Estimate inter-car distances<br/>• Infer relative positions<br/>• Fuse into shared pose estimates]
+    F --> G[Assign target points<br/>Based on chosen path + current locations<br/>• Each car gets 1 point]
+
+    %% --- CAMERA / MAP UPDATE ---
+    G --> H[Camera Input Algorithm per car<br/>• Capture frames<br/>• Obstacle detection]
+    H --> I[Classify obstacles<br/>Moving vs Unmoving]
+    I --> J[Update Shared Map network<br/>• Merge observations<br/>• De-duplicate: same obstacle profile if seen by multiple cars<br/>• Broadcast map to all cars]
+
+    %% --- MOVEMENT ---
+    J --> K[Movement Algorithm per car<br/>• Plan path to assigned point]
+    K --> K2{Path obstructed?}
+    K2 -- No --> M[Estimate motor trajectory] --> N[Execute movement along path]
+    K2 -- Yes --> OA[Obstacle Algorithm]
+
+    %% --- OBSTACLE ALGORITHM DETAILS ---
+    subgraph OA_SUB[Obstacle Algorithm per car]
+        OA --> O1{Obstacle marked moving?}
+        O1 -- Yes --> O2{Waited 2 cycles yet?}
+        O2 -- No --> O3[Wait until next Current Location cycle]
+        O2 -- Yes --> O4[Repath to avoid obstacle]
+        O1 -- No --> O4
+        O4 --> O5{Repath still blocked?}
+        O5 -- Yes --> O6[Replace target point<br/>with nearest unobstructed point]
+        O5 -- No --> O7[Proceed with new path]
+        O6 --> O7
+    end
+
+    O7 --> M
+
+    %% --- LOOP CONDITIONS ---
+    N --> P{All cars reached<br/>their assigned points?}
+    P -- No --> L
+    P -- Yes --> Q[Provide feedback to child<br/>Celebrate success!]
+    Q --> A
