@@ -13,10 +13,8 @@ def main() -> None:
     shared_map = SharedMap()  # empty grid unless you merge obstacles in
     planner = MovementPlanner(planning_cfg=None, world_size=(50, 50))
 
-    motor = MotorController(MotorConfig(speed=25, step_seconds=0.18))
+    motor = MotorController(MotorConfig(speed=80, step_seconds=0.18))
     follower = PathFollower(motor, FollowerConfig(heading_to_steer_gain=22.0))
-
-    # Same test target you used before (grid coords)
     target = TargetPoint(x=45.0, y=45.0)
 
     try:
