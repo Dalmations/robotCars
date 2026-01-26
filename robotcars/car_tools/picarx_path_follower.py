@@ -18,7 +18,7 @@ class FollowerConfig:
       - we steer toward the delta direction
     """
     # A very simple mapping: angle = atan2(dy, dx) mapped into steering range.
-    # You WILL tune this based on how your PiCar-X behaves.
+    # <Tune>
     heading_to_steer_gain: float = 22.0  # degrees of steering per radian of heading
 
 
@@ -56,5 +56,4 @@ class PathFollower:
 
         # Stop and mark done
         self.motor.set_steering(0.0)
-        self.motor.stop()
         self.motor.mark_reached()
