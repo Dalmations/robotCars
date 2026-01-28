@@ -20,6 +20,8 @@ class SharedMap:
     """
     obstacles: Dict[str, Obstacle] = field(default_factory=dict)
 
+    _static_grid: Optional[np.ndarray] = None # For debug
+
     def reset_for_scenario(self, scenario: Scenario) -> None:
         self.obstacles.clear()
 
@@ -42,11 +44,18 @@ class SharedMap:
         For testing, keep it fixed or inject from car/localization later.
         """
         return (2, 2)
+    
+    # for static debug
+    def set_static_occupancy_grid(self, grid: np.ndarray) -> None:
+        self._static_grid = grid
 
     def to_occupancy_grid(self, size: Tuple[int, int] = (50, 50)) -> np.ndarray:
         """
         Returns occupancy grid. IMPORTANT: if no obstacles merged, grid is empty.
         """
+        # for debug
+        if self._static_grid is not None:
+            return self._static_grid
         w, h = size
         grid = np.zeros((w, h), dtype=np.int32)
 
@@ -94,10 +103,12 @@ class SharedMap:
         return target
 
     def plan_path_to(self, target: TargetPoint) -> Path:
-        # Simple wrapper; planner normally owns this.
+        # planner normally owns this.
         from virtual_world import astar
         start = self.get_car_grid_position()
         grid = self.to_occupancy_grid()
         goal = (int(round(target.x)), int(round(target.y)))
         raw = astar(grid, start, goal) or [start]
         return Path(waypoints=[TargetPoint(float(x), float(y)) for x, y in raw])
+    
+    
