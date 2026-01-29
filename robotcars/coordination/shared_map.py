@@ -43,7 +43,7 @@ class SharedMap:
         Placeholder: replace with per-car localization pose -> grid conversion.
         For testing, keep it fixed or inject from car/localization later.
         """
-        return (2, 2)
+        return (25, 25)
     
     # for static debug
     def set_static_occupancy_grid(self, grid: np.ndarray) -> None:

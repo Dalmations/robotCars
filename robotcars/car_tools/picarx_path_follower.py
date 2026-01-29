@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 from model import Path, TargetPoint
-from motor_controller import MotorController
+from car_tools.motor_controller import MotorController
 
 
 @dataclass
@@ -17,9 +17,9 @@ class FollowerConfig:
       - each waypoint-to-waypoint move is one step
       - we steer toward the delta direction
     """
-    # A very simple mapping: angle = atan2(dy, dx) mapped into steering range.
+    # angle = atan2(dy, dx) mapped into steering range.
     # <Tune>
-    heading_to_steer_gain: float = 22.0  # degrees of steering per radian of heading
+    heading_to_steer_gain: float = 5  # degrees of steering per radian of heading
 
 
 class PathFollower:
@@ -46,14 +46,12 @@ class PathFollower:
             if dx == 0 and dy == 0:
                 continue
 
-            # Desired "heading" in grid coordinates
-            heading = math.atan2(dy, dx)  # radians
-
             # Convert heading into a steering command
+            heading = math.atan2(dy, dx)  # radians
             steer_deg = heading * self.cfg.heading_to_steer_gain
             self.motor.set_steering(steer_deg)
             self.motor.step_forward()
 
         # Stop and mark done
-        self.motor.set_steering(0.0)
+        # self.motor.set_steering(0.0)
         self.motor.mark_reached()

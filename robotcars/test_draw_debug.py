@@ -5,8 +5,8 @@ from coordination.shared_map import SharedMap
 from car_tools.movement import MovementPlanner
 from model import TargetPoint
 
-# from car_tools.motor_controller import MotorController, MotorConfig
-# from car_tools.picarx_path_follower import PathFollower, FollowerConfig
+from car_tools.motor_controller import MotorController, MotorConfig
+from car_tools.picarx_path_follower import PathFollower, FollowerConfig
 
 from car_tools.draw_debug import TurtleObstacleGoalDrawer
 from coordination.shared_map_draw_debug import rasterize_segments_to_grid
