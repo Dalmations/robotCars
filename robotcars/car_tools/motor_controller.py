@@ -49,6 +49,22 @@ class MotorController:
         time.sleep(self.cfg.step_seconds)
         self.px.forward(0) #  stop between steps for predictability
 
+    def set_speed(self, speed: int) -> None:
+        """
+        Sets a speed command. PiCar-X uses a percent-like speed value.
+        """
+        self.cfg.speed = int(speed)
+
+    def forward_for(self, seconds: float) -> None:
+        """
+        Drive forward for a duration, then stop.
+        """
+        if seconds <= 0:
+            return
+        self.px.forward(self.cfg.speed)
+        time.sleep(seconds)
+        self.px.forward(0) #  stop between steps for predictability
+    
     def stop(self) -> None:
         self.px.stop()
 
@@ -57,3 +73,5 @@ class MotorController:
 
     def at_target(self) -> bool:
         return self._reached_target
+
+    

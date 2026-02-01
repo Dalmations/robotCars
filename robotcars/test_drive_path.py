@@ -6,7 +6,7 @@ from car_tools.movement import MovementPlanner
 from model import TargetPoint
 
 from car_tools.motor_controller import MotorController, MotorConfig
-from car_tools.picarx_path_follower import PathFollower, FollowerConfig
+from car_tools.picarx_path_follower import PurePursuitFollower, FollowerConfig
 
 
 def main() -> None:
@@ -14,7 +14,7 @@ def main() -> None:
     planner = MovementPlanner(planning_cfg=None, world_size=(50, 50))
 
     motor = MotorController(MotorConfig(speed=80, step_seconds=0.18))
-    follower = PathFollower(motor, FollowerConfig(heading_to_steer_gain=22.0))
+    follower = PurePursuitFollower(motor, FollowerConfig())
     target = TargetPoint(x=45.0, y=45.0)
 
     try:
