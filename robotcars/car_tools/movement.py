@@ -8,7 +8,7 @@ import numpy as np
 
 from model import Path, TargetPoint
 from coordination.shared_map import SharedMap
-from virtualworld import astar, VirtualWorld, create_virtual_world
+from virtualworld import astar
 
 GridPoint = Tuple[int, int]
 

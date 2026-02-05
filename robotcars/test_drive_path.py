@@ -24,7 +24,7 @@ def main() -> None:
 
     motor = MotorController(MotorConfig(speed=80, step_seconds=0.18))
     follower = PurePursuitFollower(motor, FollowerConfig())
-    target = TargetPoint(x=45.0, y=45.0)
+    target = TargetPoint(x=45.0, y=45.0) # static target for testing
 
     try:
         path = planner.plan_to_target(target=target, shared_map=shared_map)

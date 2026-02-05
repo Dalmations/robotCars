@@ -26,7 +26,9 @@ class SharedMap:
         self.obstacles.clear()
 
     def merge_observations(self, car_id: int, obs: Observations, pose: Pose) -> None:
-        # TODO: de-dup logic; for now just overwrite by obstacle_id
+        # TODO: for each car, take their current location and obstacle and place within the map.
+        # Also handle duplicates. Probably use spatial indexing and combine obstacles.
+        # for now just overwrite by obstacle_id
         for ob in obs.obstacles:
             self.obstacles[ob.obstacle_id] = ob
 
@@ -101,7 +103,7 @@ class SharedMap:
 
     def plan_path_to(self, target: TargetPoint) -> Path:
         # planner normally owns this.
-        from virtual_world import astar
+        from virtualworld import astar
         start = self.get_car_grid_position()
         grid = self.to_occupancy_grid()
         goal = (int(round(target.x)), int(round(target.y)))

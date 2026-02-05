@@ -13,12 +13,12 @@ from model import TargetPoint
 @dataclass
 class MotorConfig:
     # Steering
-    max_steer_deg: float = 35.0     # PiCar-X examples use ~35 deg
+    max_steer_deg: float = 35.0    # PiCar-X examples use ~35 deg
     steer_gain: float = 1.0        # multiply desired steering angle
 
     # Motion
     speed: int = 80                # 0..100-ish (library uses percent-like speed)
-    step_seconds: float = 0.18     # time to move ~1 grid cell (tune for your car & cell size)
+    step_seconds: float = 0.2     # time to move ~1 grid cell (tune for your car & cell size)
 
     # Safety
     settle_seconds: float = 0.02   # brief pause after steering changes

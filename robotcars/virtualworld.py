@@ -41,41 +41,6 @@ class VirtualWorld:
             self.height[self.grid == 1] += 3.0
 
 
-def create_virtual_world(
-    size: Tuple[int, int] = (50, 50),
-    add_default_obstacles: bool = False,
-    add_height_map: bool = True,
-) -> VirtualWorld:
-    """
-    Create a simple 2.5D world.
-    Default is no obstacles to avoid blocking paths in tests.
-    """
-    w, h = size
-    grid = np.zeros((w, h), dtype=np.int32)
-
-    # Optional height map
-    height = None
-    if add_height_map:
-        x = np.linspace(-3, 3, w)
-        y = np.linspace(-3, 3, h)
-        X, Y = np.meshgrid(x, y, indexing="ij")
-        height = np.sin(X) * np.cos(Y)  # smooth hills
-
-    if add_default_obstacles:
-        # Add some rectangular obstacles
-        grid[10:15, 5:25] = 1
-        grid[25:30, 20:45] = 1
-        grid[35:40, 10:20] = 1
-
-        # Add a wall with a gap
-        grid[5:45, 30] = 1
-        grid[20:30, 30] = 0  # gap
-
-        if height is not None:
-            height[grid == 1] += 3.0
-
-    return VirtualWorld(grid=grid, height=height)
-
 
 def heuristic(a: Point, b: Point) -> float:
     return float(np.linalg.norm(np.array(a) - np.array(b)))

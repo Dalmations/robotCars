@@ -23,13 +23,13 @@ class FollowerConfig:
     - dt: control tick duration in seconds
     """
     lookahead: float = 3.0              # grid units
-    wheelbase: float = 2.0              # grid units (effective)
-    v: float = 2.0                      # grid units per second (effective)
+    wheelbase: float = 2.0              # grid units 
+    v: float = 5.0                      # grid units per second
     dt: float = 0.10                    # seconds per control update
 
     max_steer_deg: float = 35.0         # clamp to match MotorConfig.max_steer_deg
     goal_tolerance: float = 1.0         # grid units to final waypoint
-    speed_cmd: int = 80                 # motor_controller speed (0..100-ish)
+    speed_cmd: int = 80                 # motor_controller speed (0..100)
 
 
 class Pose2D:
@@ -102,7 +102,6 @@ class PurePursuitFollower:
 
         finally:
             self.motor.set_steering(0.0)
-            self.motor.stop()
             self.motor.mark_reached()
 
     # -------------------------

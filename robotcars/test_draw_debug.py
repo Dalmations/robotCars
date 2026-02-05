@@ -32,7 +32,7 @@ def main() -> None:
 
     target = TargetPoint(x=float(round(goal[0])), y=float(round(goal[1])))
 
-    motor = MotorController(MotorConfig(speed=80, step_seconds=0.18))
+    motor = MotorController(MotorConfig())
     follower = PurePursuitFollower(motor, FollowerConfig())
 
     try:
