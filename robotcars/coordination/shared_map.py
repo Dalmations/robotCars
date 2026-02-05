@@ -15,8 +15,8 @@ GridPoint = Tuple[int, int]
 @dataclass
 class SharedMap:
     """
-    Flowchart node: 'Update Shared Map (network)... Broadcast map to all cars'
-    For now: stores obstacles but does NOT create any unless merged from observations.
+    'Update Shared Map (network)... Broadcast map to all cars'
+    Stores obstacles but does not create any unless merged from observations.
     """
     obstacles: Dict[str, Obstacle] = field(default_factory=dict)
 
@@ -31,17 +31,15 @@ class SharedMap:
             self.obstacles[ob.obstacle_id] = ob
 
     def snapshot(self) -> "SharedMap":
-        # shallow copy is enough for now
         snap = SharedMap()
         snap.obstacles = dict(self.obstacles)
         return snap
 
-    # --- Planning interfaces used by MovementPlanner/ObstacleHandler ---
+    # --- Used by MovementPlanner/ObstacleHandler ---
 
     def get_car_grid_position(self) -> GridPoint:
         """
         Placeholder: replace with per-car localization pose -> grid conversion.
-        For testing, keep it fixed or inject from car/localization later.
         """
         return (2, 2)
     
@@ -68,7 +66,6 @@ class SharedMap:
 
         return grid
 
-    # These are called by obstacle_algorithm.py in the earlier architecture
     def get_blocking_obstacle(self, proposed_path: Path) -> Optional[Obstacle]:
         grid = self.to_occupancy_grid()
         for wp in proposed_path.waypoints:
@@ -86,11 +83,11 @@ class SharedMap:
         return self.get_blocking_obstacle(path) is not None
 
     def repath_around(self, proposed_path: Path) -> Path:
-        # Placeholder: true repath should be done in MovementPlanner with updated constraints.
+        # Placeholder: Repath should be done in MovementPlanner
         return proposed_path
 
     def nearest_unobstructed_point(self, target: TargetPoint) -> TargetPoint:
-        # Simple spiral search outward
+        # Spiral search outward
         grid = self.to_occupancy_grid()
         tx, ty = int(round(target.x)), int(round(target.y))
         w, h = grid.shape

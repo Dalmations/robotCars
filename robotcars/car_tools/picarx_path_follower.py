@@ -7,7 +7,10 @@ from typing import Optional, Tuple, List
 
 from model import Path, TargetPoint
 from car_tools.motor_controller import MotorController
+from typing import Callable, Optional
 
+
+TickCallback = Callable[[float, float, float], None]  # x, y, yaw (grid units, radians) Callback for PurePursuit
 
 @dataclass
 class FollowerConfig:
@@ -53,8 +56,10 @@ class PurePursuitFollower:
     def __init__(self, motor: MotorController, cfg: Optional[FollowerConfig] = None):
         self.motor = motor
         self.cfg = cfg or FollowerConfig()
+        
 
-    def follow(self, path: Path, start_pose: Optional[Pose2D] = None) -> None:
+    # def follow(self, path: Path, start_pose: Optional[Pose2D] = None) -> None:
+    def follow(self, path: Path, start_pose: Optional[Pose2D] = None, on_tick: Optional[TickCallback] = None) -> None:
         wps = path.waypoints
         if len(wps) < 2:
             return
@@ -77,6 +82,8 @@ class PurePursuitFollower:
 
         try:
             while True:
+                if on_tick is not None:
+                    on_tick(pose.x, pose.y, pose.yaw)
                 if self._dist((pose.x, pose.y), goal) <= self.cfg.goal_tolerance:
                     break
 

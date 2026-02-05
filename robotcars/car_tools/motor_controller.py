@@ -44,11 +44,6 @@ class MotorController:
         self.px.set_dir_servo_angle(a)
         time.sleep(self.cfg.settle_seconds)
 
-    def step_forward(self) -> None:
-        self.px.forward(self.cfg.speed)
-        time.sleep(self.cfg.step_seconds)
-        self.px.forward(0) #  stop between steps for predictability
-
     def set_speed(self, speed: int) -> None:
         """
         Sets a speed command. PiCar-X uses a percent-like speed value.

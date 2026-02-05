@@ -48,7 +48,7 @@ def create_virtual_world(
 ) -> VirtualWorld:
     """
     Create a simple 2.5D world.
-    IMPORTANT CHANGE: default is NO obstacles to avoid blocking paths in tests.
+    Default is no obstacles to avoid blocking paths in tests.
     """
     w, h = size
     grid = np.zeros((w, h), dtype=np.int32)

@@ -53,7 +53,7 @@ class MultiCarCoordinator:
             self.feedback.try_again()
 
     def _run_scenario_loop(self, scenario: Scenario) -> None:
-        # Clear/initialize shared world for this scenario
+        # Clear/initialize shared world
         self.shared_map.reset_for_scenario(scenario)
 
         while True:
