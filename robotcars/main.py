@@ -8,7 +8,10 @@ cam = PiCarXCamera(CameraConfig(display_web=True, obstacle_color="red"))
 cam.start()
 
 intr = CameraIntrinsics(
-    fx=600.0, fy=600.0, cx=cam.cfg.frame_size[0] / 2.0, cy=cam.cfg.frame_size[1] / 2.0
+    fx=628.0,
+    fy=642.0,
+    cx=cam.cfg.frame_size[0] / 2.0,  # 320 for 640x480
+    cy=cam.cfg.frame_size[1] / 2.0,  # 240 for 640x480
 )
 
 det = VslamObstacleDetector(intr=intr, shared_map=shared_map, car_id=0)
