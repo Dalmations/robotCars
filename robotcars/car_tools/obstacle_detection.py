@@ -68,9 +68,9 @@ class MonoVSLAM:
         self.Twc = np.eye(4, dtype=np.float64)
         self._new_points: List[Tuple[float, float, float]] = []
 
-    def process(self, frame_bgr: np.ndarray) -> Tuple[bool, np.ndarray, List[Tuple[float, float, float]]]:
+    def process(self, frame) -> Tuple[bool, np.ndarray, List[Tuple[float, float, float]]]:
         self._new_points = []
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         kp, des = self.orb.detectAndCompute(gray, None)
         if des is None or kp is None or len(kp) < 200:
@@ -167,8 +167,8 @@ class VslamObstacleDetector:
         self.car_id = car_id
         self._seq = 0
 
-    def tick(self, frame_bgr: np.ndarray) -> Optional[Pose]:
-        ok, Twc, new_pts = self.slam.process(frame_bgr)
+    def tick(self, frame) -> Optional[Pose]:
+        ok, Twc, new_pts = self.slam.process(frame)
         if not ok:
             return None
 

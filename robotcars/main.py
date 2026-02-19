@@ -21,7 +21,7 @@ det = VslamObstacleDetector(intr=intr, shared_map=shared_map, car_id=0)
 # shared_map.obstacles fills
 try:
     while True:
-        frame = cam.read_bgr()
+        frame = cam.read()
         if frame is None:
             continue
         pose = det.tick(frame)

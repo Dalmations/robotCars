@@ -13,12 +13,6 @@ from vilib import Vilib  # SunFounder vision library
 from model import Observations, Obstacle, Pose
 
 
-try:
-    from picamera2 import Picamera2
-except Exception:  # pragma: no cover
-    Picamera2 = None
-
-
 @dataclass
 class CameraConfig:
     # Vilib camera + streaming
@@ -61,9 +55,6 @@ class PiCarXCamera:
         self._last_report_t = 0.0
         self._seq = 0
 
-        self._picam: Optional["Picamera2"] = None
-        self._cap: Optional[cv2.VideoCapture] = None
-
     # --------------------
     # Lifecycle
     # --------------------
@@ -75,9 +66,6 @@ class PiCarXCamera:
         Vilib.camera_start(vflip=self.cfg.vflip, hflip=self.cfg.hflip)
         Vilib.display(local=self.cfg.display_local, web=self.cfg.display_web)
         Vilib.color_detect(self.cfg.obstacle_color)
-
-        # Start frame source for SLAM
-        self._start_frame_stream()
 
         self._started = True
 
@@ -97,66 +85,19 @@ class PiCarXCamera:
         except Exception:
             pass
 
-        # Stop frame stream
-        self._stop_frame_stream()
 
         self._started = False
 
-    # --------------------
-    # Frames for SLAM
-    # --------------------
-    def _start_frame_stream(self) -> None:
-        w, h = self.cfg.frame_size
-
-        if self.cfg.use_picamera2 and Picamera2 is not None:
-            self._picam = Picamera2()
-            config = self._picam.create_video_configuration(
-                main={"size": (w, h), "format": "XRGB8888"}
-            )
-            self._picam.configure(config)
-            self._picam.start()
-            return
-
-        # OpenCV fallback
-        self._cap = cv2.VideoCapture(0)
-        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-
-    def _stop_frame_stream(self) -> None:
-        if self._picam is not None:
-            try:
-                self._picam.stop()
-            except Exception:
-                pass
-            self._picam = None
-
-        if self._cap is not None:
-            try:
-                self._cap.release()
-            except Exception:
-                pass
-            self._cap = None
-
-    def read_bgr(self) -> Optional[np.ndarray]:
+    def read(self) -> Optional[np.ndarray]:
         """
-        Returns a BGR frame for vSLAM / OpenCV processing.
+        Returns a frame for vSLAM / OpenCV processing.
         """
         if not self._started:
             return None
 
-        if self._picam is not None:
-            frame_bgra = self._picam.capture_array()
-            # Picamera2 often provides BGRA/XRGB; convert to BGR for OpenCV
-            frame_bgr = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2BGR)
-            return frame_bgr
-
-        if self._cap is None:
-            return None
-
-        ok, frame = self._cap.read()
-        if not ok:
-            return None
-        return frame
+        img = Vilib.take_photo('test.jpg')
+        img = cv2.imread('test.jpg')
+        return img
 
     # --------------------
     # Vilib-based obstacle observations
