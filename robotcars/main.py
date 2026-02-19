@@ -16,14 +16,16 @@ intr = CameraIntrinsics(
 
 det = VslamObstacleDetector(intr=intr, shared_map=shared_map, car_id=0)
 
+# shared_map.poses[0] updates when pose is valid
+# shared_map.map_points grows
+# shared_map.obstacles fills
 try:
     while True:
         frame = cam.read_bgr()
         if frame is None:
             continue
         pose = det.tick(frame)
-        # shared_map.poses[0] updates when pose is valid
-        # shared_map.map_points grows
-        # shared_map.obstacles fills
+        if pose is not None:
+            print("pose:", pose.x, pose.y, pose.theta, "obstacles:", len(shared_map.obstacles), "pts:", len(shared_map.map_points))
 finally:
     cam.stop()
