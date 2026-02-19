@@ -15,37 +15,54 @@ GridPoint = Tuple[int, int]
 @dataclass
 class SharedMap:
     """
-    'Update Shared Map (network)... Broadcast map to all cars'
+    'Update Shared Map Broadcast map to all cars'
     Stores obstacles but does not create any unless merged from observations.
     """
     obstacles: Dict[str, Obstacle] = field(default_factory=dict)
+    poses: Dict[int, Pose] = field(default_factory=dict)
+    map_points: List[Tuple[float, float, float]] = field(default_factory=list)
 
-    _static_grid: Optional[np.ndarray] = None # For debug
+    _static_grid: Optional[np.ndarray] = None
 
     def reset_for_scenario(self, scenario: Scenario) -> None:
         self.obstacles.clear()
+        self.poses.clear()
+        self.map_points.clear()
 
     def merge_observations(self, car_id: int, obs: Observations, pose: Pose) -> None:
-        # TODO: for each car, take their current location and obstacle and place within the map.
-        # Also handle duplicates. Probably use spatial indexing and combine obstacles.
-        # for now just overwrite by obstacle_id
+        self.poses[car_id] = pose
         for ob in obs.obstacles:
             self.obstacles[ob.obstacle_id] = ob
+
+    def merge_slam_update(
+        self,
+        car_id: int,
+        pose: Pose,
+        new_map_points: Optional[List[Tuple[float, float, float]]] = None,
+        max_points: int = 5000,
+    ) -> None:
+        self.poses[car_id] = pose
+        if new_map_points:
+            self.map_points.extend(new_map_points)
+            if len(self.map_points) > max_points:
+                self.map_points = self.map_points[-max_points:]
 
     def snapshot(self) -> "SharedMap":
         snap = SharedMap()
         snap.obstacles = dict(self.obstacles)
+        snap.poses = dict(self.poses)
+        snap.map_points = list(self.map_points)
+        snap._static_grid = self._static_grid.copy() if self._static_grid is not None else None
         return snap
 
     # --- Used by MovementPlanner/ObstacleHandler ---
 
-    def get_car_grid_position(self) -> GridPoint:
-        """
-        Placeholder: replace with per-car localization pose -> grid conversion.
-        """
-        return (2, 2)
-    
-    # for static debug
+    def get_car_grid_position(self, car_id: int = 0) -> GridPoint:
+        p = self.poses.get(car_id)
+        if p is None:
+            return (25, 25)
+        return (int(round(p.x)), int(round(p.y)))
+
     def set_static_occupancy_grid(self, grid: np.ndarray) -> None:
         self._static_grid = grid
 
@@ -53,7 +70,6 @@ class SharedMap:
         """
         Returns occupancy grid. IMPORTANT: if no obstacles merged, grid is empty.
         """
-        # for debug
         if self._static_grid is not None:
             return self._static_grid
         w, h = size
@@ -102,7 +118,6 @@ class SharedMap:
         return target
 
     def plan_path_to(self, target: TargetPoint) -> Path:
-        # planner normally owns this.
         from virtualworld import astar
         start = self.get_car_grid_position()
         grid = self.to_occupancy_grid()

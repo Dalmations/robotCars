@@ -1,42 +1,26 @@
-from config import Config
-from coordination.coordinator import MultiCarCoordinator
-from coordination.network_bus import NetworkBus
+from car_tools.camera_input import PiCarXCamera, CameraConfig
+from car_tools.obstacle_detection import VslamObstacleDetector, CameraIntrinsics
 from coordination.shared_map import SharedMap
-from speech_input.speech_processing import SpeechProcessor
-from speech_input.bucketing import ScenarioBucketer
-from speech_input.feedback import ChildFeedback
-from coordination.localization import LocalizationEngine
-from coordination.point_assignment import PointAssigner
-from car_tools.car import CarAgent
 
-def main() -> None:
-    cfg = Config.load()
+shared_map = SharedMap()
 
-    network = NetworkBus()
-    shared_map = SharedMap()
+cam = PiCarXCamera(CameraConfig(display_web=True, obstacle_color="red"))
+cam.start()
 
-    speech = SpeechProcessor(cfg.speech)
-    bucketer = ScenarioBucketer(cfg.therapy)
-    feedback = ChildFeedback(cfg.feedback)
+intr = CameraIntrinsics(
+    fx=600.0, fy=600.0, cx=cam.cfg.frame_size[0] / 2.0, cy=cam.cfg.frame_size[1] / 2.0
+)
 
-    localization = LocalizationEngine(cfg.localization)
-    assigner = PointAssigner(cfg.assignment)
+det = VslamObstacleDetector(intr=intr, shared_map=shared_map, car_id=0)
 
-    cars = [CarAgent.from_config(car_id=i, cfg=cfg, network=network) for i in range(cfg.fleet_size)]
-
-    coordinator = MultiCarCoordinator(
-        cars=cars,
-        network=network,
-        shared_map=shared_map,
-        speech=speech,
-        bucketer=bucketer,
-        feedback=feedback,
-        localization=localization,
-        assigner=assigner,
-        cfg=cfg,
-    )
-
-    coordinator.run_forever()  # loops back to Start after Celebrate success
-
-if __name__ == "__main__":
-    main()
+try:
+    while True:
+        frame = cam.read_bgr()
+        if frame is None:
+            continue
+        pose = det.tick(frame)
+        # shared_map.poses[0] updates when pose is valid
+        # shared_map.map_points grows
+        # shared_map.obstacles fills
+finally:
+    cam.stop()
