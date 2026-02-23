@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import numpy as np
+import math
 
 from model import Path, TargetPoint
 from coordination.shared_map import SharedMap
@@ -46,3 +47,22 @@ class MovementPlanner:
                 if grid[x, y] == 1:
                     return True
         return False
+
+    def plan_formation(self, shape : str) -> Path:
+        match shape:
+            case 'circle':
+                return Path([TargetPoint(x, y) for (x, y) in self.generate_circle_points()])
+
+    def generate_circle_points(self, num_points=360):
+        center_x = center_y = radius = self.world_size / 2
+        points = []
+        
+        for i in range(num_points):
+            theta = 2 * math.pi * i / num_points
+            
+            x = center_x + radius * math.cos(theta)
+            y = center_y - radius * math.sin(theta)
+            
+            points.append((x, y))
+
+        return points
