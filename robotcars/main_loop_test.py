@@ -25,9 +25,13 @@ def main():
     motor = MotorController(MotorConfig(speed=80))
     follower = PurePursuitFollower(motor, FollowerConfig())
     while True:
-        msg = fc.message_q.get()
-        path = planner.plan_formation(msg['message'])
-        follower.follow(path)
-        motor.stop()
+        try:
+            msg = fc.message_q.get()
+            # msg = {'message':'circle'}
+            path = planner.plan_formation(msg['message'])
+            follower.follow(path)
+            motor.stop()
+        finally:
+            motor.stop()
 
 main()

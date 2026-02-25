@@ -20,8 +20,8 @@ class MovementPlanner:
     Flowchart node: 'Movement Algorithm (per car) • Plan path to assigned point'
     Uses A* over an occupancy grid coming from SharedMap.
     """
-    planning_cfg: object
-    world_size: tuple[int, int] = (50, 50)
+    planning_cfg: object = None
+    world_size: tuple[int, int] = (25,25)
 
     def plan_to_target(self, target: TargetPoint, shared_map: SharedMap) -> Path:
         start = shared_map.get_car_grid_position()
@@ -51,10 +51,17 @@ class MovementPlanner:
     def plan_formation(self, shape : str) -> Path:
         match shape:
             case 'circle':
+                with open('path_points.txt','w') as f:
+                    for pair in self.generate_circle_points():
+                        f.write(f'{pair}\n')
                 return Path([TargetPoint(x, y) for (x, y) in self.generate_circle_points()])
+            case _:
+                return Path([])
 
-    def generate_circle_points(self, num_points=360):
-        center_x = center_y = radius = self.world_size / 2
+    def generate_circle_points(self, num_points=100):
+        center_x = self.world_size[0] / 2
+        center_y = self.world_size[1] / 2
+        radius = self.world_size[0] / 2
         points = []
         
         for i in range(num_points):

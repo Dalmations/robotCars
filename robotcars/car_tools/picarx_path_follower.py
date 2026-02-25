@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
+import time
 
 from model import Path, TargetPoint
 from car_tools.motor_controller import MotorController
@@ -28,8 +29,8 @@ class FollowerConfig:
     dt: float = 0.10                    # seconds per control update
 
     max_steer_deg: float = 35.0         # clamp to match MotorConfig.max_steer_deg
-    goal_tolerance: float = 1.0         # grid units to final waypoint
-    speed_cmd: int = 80                 # motor_controller speed (0..100)
+    goal_tolerance: float = 3.0         # grid units to final waypoint
+    speed_cmd: int = 100                 # motor_controller speed (0..100)
 
 
 class Pose2D:
@@ -79,12 +80,19 @@ class PurePursuitFollower:
 
         # Configure speed (open loop)
         self.motor.set_speed(self.cfg.speed_cmd)
-
+        print(f'Goal: {goal}')
+        f = open('poses.txt', 'w')
+        loop_start = time.perf_counter()
         try:
             while True:
+                f.write(f'{pose.x, pose.y}  {self._dist((pose.x, pose.y), goal)}\n')
+                print(f'{pose.x, pose.y}  {self._dist((pose.x, pose.y), goal)}\n')
                 if on_tick is not None:
                     on_tick(pose.x, pose.y, pose.yaw)
-                if self._dist((pose.x, pose.y), goal) <= self.cfg.goal_tolerance:
+                
+                # break from following if within tolerance of goal and loop has been running for more than 2 seconds
+                # without the time condition, this breaks when start and goal positions are the same
+                if self._dist((pose.x, pose.y), goal) <= self.cfg.goal_tolerance and time.perf_counter()-loop_start > 2:
                     break
 
                 target = self._lookahead_point(pose, pts, self.cfg.lookahead)
@@ -99,8 +107,10 @@ class PurePursuitFollower:
 
                 # Dead-reckoning pose update (grid bicycle model)
                 pose = self._update_pose(pose, steer_deg, self.cfg.v, self.cfg.wheelbase, self.cfg.dt)
+                # pose = Pose2D(target[0],target[1],pose.yaw)
 
         finally:
+            f.close()
             self.motor.set_steering(0.0)
             self.motor.mark_reached()
 
