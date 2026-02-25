@@ -3,6 +3,7 @@ import queue
 from car_tools.movement import MovementPlanner
 from car_tools.motor_controller import MotorController, MotorConfig
 from car_tools.picarx_path_follower import PurePursuitFollower, FollowerConfig
+from speech_input.test_phrase_to_bucket import classify
 
 
 from comms.MQTTClient import MQTTClient
@@ -28,7 +29,8 @@ def main():
         try:
             msg = fc.message_q.get()
             # msg = {'message':'circle'}
-            path = planner.plan_formation(msg['message'])
+            shape = classify(msg['message'])
+            path = planner.plan_formation(shape)
             follower.follow(path)
             motor.stop()
         finally:
