@@ -2,163 +2,127 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
-from typing import Optional, Tuple, List
+from typing import Optional
 
-from model import Path, TargetPoint
+import numpy as np
+
+from model import Path, Pose
 from car_tools.motor_controller import MotorController
-from typing import Callable, Optional
+from coordination.shared_map import SharedMap
 
-
-TickCallback = Callable[[float, float, float], None]  # x, y, yaw (grid units, radians) Callback for PurePursuit
 
 @dataclass
 class FollowerConfig:
-    """
-    Pure Pursuit parameters in *grid units* (NOT meters).
-
-    - lookahead: how far ahead (in grid units) to chase a point
-    - wheelbase: effective wheelbase in grid units (tune)
-    - v: estimated speed in grid units / second (tune)
-    - dt: control tick duration in seconds
-    """
-    lookahead: float = 3.0              # grid units
-    wheelbase: float = 2.0              # grid units 
-    v: float = 5.0                      # grid units per second
-    dt: float = 0.10                    # seconds per control update
-
-    max_steer_deg: float = 35.0         # clamp to match MotorConfig.max_steer_deg
-    goal_tolerance: float = 1.0         # grid units to final waypoint
-    speed_cmd: int = 80                 # motor_controller speed (0..100)
+    dt: float = 0.10                 # control loop seconds
+    lookahead: float = 6.0           # grid units (tune)
+    wheelbase: float = 5.0           # grid units (effective; tune)
+    goal_tolerance: float = 2.0      # grid units
+    max_run_seconds: float = 45.0
 
 
-class Pose2D:
-    __slots__ = ("x", "y", "yaw")
-
-    def __init__(self, x: float, y: float, yaw: float):
-        self.x = float(x)
-        self.y = float(y)
-        self.yaw = float(yaw)  # radians
-
-    def copy(self) -> "Pose2D":
-        return Pose2D(self.x, self.y, self.yaw)
-
-
-class PurePursuitFollower:
-    """
-    Matlab-style Pure Pursuit in grid coordinates.
-
-    IMPORTANT: This currently uses dead-reckoning pose updates based on an
-    *estimated* v (grid units/sec) and the commanded steering angle.
-    For real accuracy, later we will replace pose updates with camera/odometry.
-    """
-
+class PathFollower:
     def __init__(self, motor: MotorController, cfg: Optional[FollowerConfig] = None):
         self.motor = motor
         self.cfg = cfg or FollowerConfig()
-        
 
-    # def follow(self, path: Path, start_pose: Optional[Pose2D] = None) -> None:
-    def follow(self, path: Path, start_pose: Optional[Pose2D] = None, on_tick: Optional[TickCallback] = None) -> None:
+    def follow(self, path: Path) -> None:
+        # point-to-point headings
         wps = path.waypoints
         if len(wps) < 2:
             return
+        for i in range(1, len(wps)):
+            prev = wps[i - 1]
+            cur = wps[i]
+            dx = cur.x - prev.x
+            dy = cur.y - prev.y
+            if dx == 0 and dy == 0:
+                continue
+            heading = math.atan2(dy, dx)
+            steer_deg = float(np.rad2deg(heading))
+            self.motor.set_steering(steer_deg)
+            self.motor.step_forward()
+        self.motor.mark_reached()
 
-        # Waypoints as (x, y) in grid units
-        pts: List[Tuple[float, float]] = [(wp.x, wp.y) for wp in wps]
-        goal = pts[-1]
+    def follow_with_slam(
+        self,
+        path: Path,
+        shared_map: SharedMap,
+        car_id: int = 0,
+        camera=None,
+        slam_detector=None,
+    ) -> None:
+        if len(path.waypoints) < 2:
+            return
 
-        # Init pose
-        if start_pose is None:
-            x0, y0 = pts[0]
-            x1, y1 = pts[1]
-            yaw0 = math.atan2(y1 - y0, x1 - x0)
-            pose = Pose2D(x0, y0, yaw0)
-        else:
-            pose = start_pose.copy()
-
-        # Configure speed (open loop)
-        self.motor.set_speed(self.cfg.speed_cmd)
+        t0 = time.time()
+        last_pose: Optional[Pose] = None
 
         try:
             while True:
-                if on_tick is not None:
-                    on_tick(pose.x, pose.y, pose.yaw)
-                if self._dist((pose.x, pose.y), goal) <= self.cfg.goal_tolerance:
+                if (time.time() - t0) > self.cfg.max_run_seconds:
                     break
 
-                target = self._lookahead_point(pose, pts, self.cfg.lookahead)
-                steer_deg = self._pure_pursuit_steer_deg(pose, target)
+                # Update pose from SLAM
+                if camera is not None and slam_detector is not None:
+                    frame = camera.read()
+                    if frame is not None:
+                        pose = slam_detector.tick(frame)
+                        if pose is not None:
+                            last_pose = pose
 
-                # Clamp to safe steering
-                steer_deg = max(-self.cfg.max_steer_deg, min(self.cfg.max_steer_deg, steer_deg))
+                pose = shared_map.poses.get(car_id) or last_pose
+                if pose is None:
+                    time.sleep(self.cfg.dt)
+                    continue
 
-                # Command hardware
+                # Stop if near goal
+                goal = path.waypoints[-1]
+                if self._dist(pose.x, pose.y, goal.x, goal.y) <= self.cfg.goal_tolerance:
+                    self.motor.mark_reached()
+                    break
+
+                # Pure Pursuit target
+                target = self._lookahead_point(path, pose, self.cfg.lookahead)
+                delta_rad = self._pure_pursuit_delta(pose, target_x=target[0], target_y=target[1])
+
+                steer_deg = float(np.rad2deg(delta_rad))
                 self.motor.set_steering(steer_deg)
                 self.motor.forward_for(self.cfg.dt)
 
-                # Dead-reckoning pose update (grid bicycle model)
-                pose = self._update_pose(pose, steer_deg, self.cfg.v, self.cfg.wheelbase, self.cfg.dt)
-
         finally:
-            self.motor.set_steering(0.0)
-            self.motor.mark_reached()
+            self.motor.stop()
 
-    # -------------------------
-    # Pure Pursuit math
-    # -------------------------
-    def _pure_pursuit_steer_deg(self, pose: Pose2D, target: Tuple[float, float]) -> float:
-        """
-        Pure Pursuit steering:
-          alpha = angle between heading and target direction
-          delta = atan(2L*sin(alpha)/Ld)
 
-        Returns steering in degrees (for PiCar-X servo).
-        """
-        tx, ty = target
-        dx = tx - pose.x
-        dy = ty - pose.y
+    # Pure Pursuit 
+    def _lookahead_point(self, path: Path, pose: Pose, Ld: float) -> tuple[float, float]:
+        x, y = pose.x, pose.y
+        best = (path.waypoints[-1].x, path.waypoints[-1].y)
 
-        # Target heading in global
-        target_heading = math.atan2(dy, dx)
-        alpha = self._wrap_angle(target_heading - pose.yaw)
+        # Find the first waypoint at least Ld away; if none, use last waypoint
+        for wp in path.waypoints:
+            if self._dist(x, y, wp.x, wp.y) >= Ld:
+                return (wp.x, wp.y)
+        return best
 
-        Ld = max(1e-6, math.hypot(dx, dy))
-        delta_rad = math.atan2(2.0 * self.cfg.wheelbase * math.sin(alpha), Ld)
-        return math.degrees(delta_rad)
+    def _pure_pursuit_delta(self, pose: Pose, target_x: float, target_y: float) -> float:
+        dx = target_x - pose.x
+        dy = target_y - pose.y
 
-    def _lookahead_point(
-        self,
-        pose: Pose2D,
-        pts: List[Tuple[float, float]],
-        lookahead: float,
-    ) -> Tuple[float, float]:
-        """
-        Pick the first waypoint at least lookahead distance from the current pose.
-        If none, use final goal.
-        """
-        px, py = pose.x, pose.y
-        for x, y in pts:
-            if math.hypot(x - px, y - py) >= lookahead:
-                return (x, y)
-        return pts[-1]
+        path_angle = math.atan2(dy, dx)
+        alpha = self._wrap_angle(path_angle - pose.theta)
 
-    def _update_pose(self, pose: Pose2D, steer_deg: float, v: float, L: float, dt: float) -> Pose2D:
-        """
-        Bicycle model update in grid units:
-          x += v cos(yaw) dt
-          y += v sin(yaw) dt
-          yaw += v/L * tan(delta) dt
-        """
-        delta = math.radians(steer_deg)
-        x = pose.x + v * math.cos(pose.yaw) * dt
-        y = pose.y + v * math.sin(pose.yaw) * dt
-        yaw = pose.yaw + (v / max(1e-6, L)) * math.tan(delta) * dt
-        return Pose2D(x, y, self._wrap_angle(yaw))
+        Ld = max(1e-6, self._dist(pose.x, pose.y, target_x, target_y))
+        L = max(1e-6, float(self.cfg.wheelbase))
+
+        # Bicycle pure pursuit:
+        # delta = atan2(2*L*sin(alpha), Ld)
+        return math.atan2(2.0 * L * math.sin(alpha), Ld)
 
     @staticmethod
-    def _dist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
-        return math.hypot(a[0] - b[0], a[1] - b[1])
+    def _dist(x0: float, y0: float, x1: float, y1: float) -> float:
+        return float(math.hypot(x1 - x0, y1 - y0))
 
     @staticmethod
     def _wrap_angle(a: float) -> float:
