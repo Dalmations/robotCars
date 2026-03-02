@@ -62,13 +62,13 @@ class ReplanConfig:
     replan_min_interval_s: float = 0.7  # avoid thrashing on noisy readings
 
     # ultrasonic thresholds (cm)
-    # SunFounder obstacle avoidance lesson uses SafeDistance=40, DangerDistance=20. :contentReference[oaicite:4]{index=4}
+    # SunFounder obstacle avoidance lesson uses SafeDistance=40, DangerDistance=20
     ultra_replan_cm: float = 40.0       # "something ahead" => replan soon
     ultra_emergency_cm: float = 20.0    # "too close" => stop/back up + replan
 
     # map injection: cm-to-grid scaling
     cm_per_grid: float = 10.0           # TUNE: how many cm is 1 grid cell
-    obstacle_radius_cells: float = 2.0  # inflated by planner too; keep small-ish
+    obstacle_radius_cells: float = 2.0
 
     # how far ahead to drop the virtual obstacle (min/max in grid cells)
     ahead_cells_min: float = 2.0
@@ -77,7 +77,7 @@ class ReplanConfig:
     # if no obstacle for a while, clear the virtual obstacle
     ultra_clear_cm: float = 60.0
 
-    # optional: if emergency, back up a bit
+    # if emergency, back up a bit
     emergency_backup_s: float = 0.25
 
 
@@ -134,7 +134,7 @@ def drive_to_goal_with_sparse_replan(
                 shared_map.obstacles.pop(ULTRA_OB_ID, None)
             return False
 
-        # If it's within "replan range", inject an obstacle ahead
+        # Replan range, inject an obstacle ahead
         if dist_cm <= replan_cfg.ultra_replan_cm:
             last_ultra_t = time.time()
 
@@ -240,7 +240,7 @@ def drive_to_goal_with_sparse_replan(
 
             obstacle_present = maybe_update_ultra_obstacle(pose_world, dist_cm)
 
-            # ---- Replan (sparsely) ----
+            # ---- Replan
             if need_replan(dist_cm, obstacle_present):
                 goal = TargetPoint(float(goal_gx), float(goal_gy))
                 current_path = planner.plan_to_target(goal, shared_map, target_frame="grid")
@@ -312,14 +312,11 @@ def main() -> None:
 
     # Camera (Vilib)
     cam = PiCarXCamera(CameraConfig(
-        vflip=False,
-        hflip=False,
         display_local=False,
         display_web=False,
         frame_size=(640, 480),
         output_color_order="rgb",
         frame_rate=30,
-        copy_on_read=True,
     ))
     cam.start()
 
@@ -329,8 +326,8 @@ def main() -> None:
         intr, shared_map, car_id=0,
         cfg=VslamConfig(
             input_color_order=cam.color_order,
-            debug_draw_keypoints=False,
-            debug_draw_matches=False,
+            debug_draw_keypoints=True,
+            debug_draw_matches=True,
             translation_step=0.2,     # still overridden per tick
             forward_sign=-1.0,        # IMPORTANT: you observed x decreasing
             pose_ema_alpha=0.25,      # reduces jerk a lot
@@ -338,10 +335,10 @@ def main() -> None:
     )
 
     motor = MotorController(MotorConfig(
-        speed=26,                   # slower but steady
-        step_seconds=0.40,           # tune later; higher makes VO step smaller per tick
+        speed=26,
+        step_seconds=0.40,           # tune later
         brake_between_steps=False,   # continuous motion
-        steering_slew_deg_per_s=90.0,# slower servo motion = less jerk
+        steering_slew_deg_per_s=90.0,
         steer_sign=1.0,
         steer_offset_deg=0.0,
         max_steer_deg=35.0,
