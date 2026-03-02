@@ -80,6 +80,11 @@ class ReplanConfig:
     # if emergency, back up a bit
     emergency_backup_s: float = 0.25
 
+    # pose-confidence gating
+    min_pose_conf_for_replan: float = 0.55
+    blurry_hold_after_no_replan_s: float = 3.0
+    blurry_hold_pause_s: float = 0.20
+
 
 # ---------------- Driving loop ----------------
 
@@ -188,6 +193,25 @@ def drive_to_goal_with_sparse_replan(
 
         return False
 
+    def slam_quality() -> Tuple[float, bool, bool, int]:
+        """
+        Returns:
+          confidence, high_confidence, blurry, inlier_count
+        """
+        try:
+            status = slam.get_status()
+        except Exception:
+            return 1.0, True, False, 0
+
+        conf = float(getattr(status, "confidence", 0.0))
+        high_conf = bool(
+            getattr(status, "high_confidence", False)
+            and conf >= float(replan_cfg.min_pose_conf_for_replan)
+        )
+        blurry = bool(getattr(status, "blurry", False))
+        inliers = int(getattr(status, "inlier_count", 0))
+        return conf, high_conf, blurry, inliers
+
     try:
         while (time.time() - t0) < timeout_s:
             # ---- SLAM update ----
@@ -225,6 +249,29 @@ def drive_to_goal_with_sparse_replan(
                 motor.mark_reached()
                 return True
 
+            pose_conf, pose_high_conf, pose_blurry, pose_inliers = slam_quality()
+            now = time.time()
+            since_plan = (now - last_plan_t) if last_plan_t > 0 else 0.0
+            hold_for_pose_recovery = (
+                current_path is not None
+                and pose_blurry
+                and (not pose_high_conf)
+                and since_plan >= replan_cfg.blurry_hold_after_no_replan_s
+            )
+
+            if hold_for_pose_recovery:
+                motor.stop()
+                time.sleep(max(0.01, replan_cfg.blurry_hold_pause_s))
+                if now - last_print > 1.0:
+                    last_print = now
+                    print(
+                        f"pose_g=({pose_grid.x:.1f},{pose_grid.y:.1f},{pose_grid.theta:.2f}) "
+                        f"goal=({goal_gx},{goal_gy}) d={d_goal:.1f} "
+                        f"pose_conf={pose_conf:.2f} inliers={pose_inliers} blurry={pose_blurry} "
+                        f"hold=pose_recovery replan_in={(replan_cfg.replan_period_s - since_plan):.1f}s"
+                    )
+                continue
+
             # ---- Ultrasonic check ----
             dist_cm = read_ultrasonic_cm(motor)
 
@@ -241,7 +288,9 @@ def drive_to_goal_with_sparse_replan(
             obstacle_present = maybe_update_ultra_obstacle(pose_world, dist_cm)
 
             # ---- Replan
-            if need_replan(dist_cm, obstacle_present):
+            wants_replan = need_replan(dist_cm, obstacle_present)
+            can_replan = pose_high_conf or (current_path is None)
+            if wants_replan and can_replan:
                 goal = TargetPoint(float(goal_gx), float(goal_gy))
                 current_path = planner.plan_to_target(goal, shared_map, target_frame="grid")
                 last_plan_t = time.time()
@@ -294,6 +343,7 @@ def drive_to_goal_with_sparse_replan(
                     f"pose_g=({pose_grid.x:.1f},{pose_grid.y:.1f},{pose_grid.theta:.2f}) "
                     f"goal=({goal_gx},{goal_gy}) d={d_goal:.1f} "
                     f"ultra={None if dist_cm is None else round(dist_cm,1)}cm "
+                    f"pose_conf={pose_conf:.2f} inliers={pose_inliers} blurry={pose_blurry} "
                     f"replan_in={(replan_cfg.replan_period_s - (now - last_plan_t)):.1f}s"
                 )
 

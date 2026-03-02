@@ -60,6 +60,24 @@ class VslamConfig:
     # Pose smoothing (EMA). 0 disables smoothing, 0.1-0.3 typical.
     pose_ema_alpha: float = 0.2
 
+    # Confidence gating thresholds
+    confidence_ema_alpha: float = 0.25
+    confidence_good_threshold: float = 0.55
+    confidence_min_features: int = 140
+    confidence_min_inliers: int = 45
+    confidence_min_sharpness: float = 45.0
+
+
+@dataclass
+class VslamStatus:
+    tracking_ok: bool = False
+    feature_count: int = 0
+    inlier_count: int = 0
+    sharpness: float = 0.0
+    confidence: float = 0.0
+    high_confidence: bool = False
+    blurry: bool = True
+
 
 class _Frame:
     __slots__ = ("img_gray", "kps_xy", "des", "pose_Tcw")
@@ -126,6 +144,7 @@ class MonocularVSLAM:
 
         self._last: Optional[_Frame] = None
         self._pose_filt: Optional[Pose] = None
+        self._status = VslamStatus()
 
         # Maintain Tcw (world->camera). Start at identity.
         self._Tcw = np.eye(4, dtype=np.float64)
@@ -146,10 +165,25 @@ class MonocularVSLAM:
         """Latest inlier match visualization (BGR image)."""
         return None if self._dbg_matches_bgr is None else self._dbg_matches_bgr
 
+    def get_status(self) -> VslamStatus:
+        """Return the latest SLAM tracking/quality status."""
+        s = self._status
+        return VslamStatus(
+            tracking_ok=bool(s.tracking_ok),
+            feature_count=int(s.feature_count),
+            inlier_count=int(s.inlier_count),
+            sharpness=float(s.sharpness),
+            confidence=float(s.confidence),
+            high_confidence=bool(s.high_confidence),
+            blurry=bool(s.blurry),
+        )
+
     # Main Tick()
     def tick(self, frame_bgr_or_rgb: np.ndarray, translation_step: Optional[float] = None) -> Optional[Pose]:
         gray = self._to_gray(frame_bgr_or_rgb)
         pts_xy, des = self._extract(gray)
+        sharpness = self._frame_sharpness(gray)
+        feature_count = 0 if pts_xy is None else int(len(pts_xy))
 
         # Refresh keypoint debug view
         if self.cfg.debug_draw_keypoints and pts_xy is not None and len(pts_xy) > 0:
@@ -159,6 +193,12 @@ class MonocularVSLAM:
 
         # Not enough features
         if pts_xy is None or des is None or len(pts_xy) < 50:
+            self._update_status(
+                tracking_ok=False,
+                feature_count=feature_count,
+                inlier_count=0,
+                sharpness=sharpness,
+            )
             self._publish_pose()
             return self.shared_map.poses.get(self.car_id)
 
@@ -167,6 +207,12 @@ class MonocularVSLAM:
 
         if self._last is None:
             self._last = cur
+            self._update_status(
+                tracking_ok=False,
+                feature_count=feature_count,
+                inlier_count=0,
+                sharpness=sharpness,
+            )
             self._publish_pose()
             return self.shared_map.poses.get(self.car_id)
 
@@ -177,6 +223,12 @@ class MonocularVSLAM:
             # If tracking fails, reset reference to current frame.
             # Pose stays as last good pose.
             self._last = cur
+            self._update_status(
+                tracking_ok=False,
+                feature_count=feature_count,
+                inlier_count=0,
+                sharpness=sharpness,
+            )
             self._publish_pose()
             return self.shared_map.poses.get(self.car_id)
 
@@ -226,6 +278,12 @@ class MonocularVSLAM:
             Xnav = np.column_stack((Xw_good[:, 2], -Xw_good[:, 0], -Xw_good[:, 1])).astype(np.float32)
             self.shared_map.add_map_points(Xnav)
 
+        self._update_status(
+            tracking_ok=True,
+            feature_count=feature_count,
+            inlier_count=int(idx_cur.shape[0]),
+            sharpness=sharpness,
+        )
         self._last = cur
         self._publish_pose()
         return self.shared_map.poses.get(self.car_id)
@@ -289,6 +347,47 @@ class MonocularVSLAM:
         Tinv[:3, :3] = R.T
         Tinv[:3, 3] = -R.T @ t
         return Tinv
+
+    def _update_status(
+        self,
+        *,
+        tracking_ok: bool,
+        feature_count: int,
+        inlier_count: int,
+        sharpness: float,
+    ) -> None:
+        f_ref = max(1.0, float(self.cfg.confidence_min_features))
+        i_ref = max(1.0, float(self.cfg.confidence_min_inliers))
+        s_ref = max(1e-6, float(self.cfg.confidence_min_sharpness))
+
+        feat_score = float(np.clip(float(feature_count) / f_ref, 0.0, 1.0))
+        inlier_score = float(np.clip(float(inlier_count) / i_ref, 0.0, 1.0))
+        sharp_score = float(np.clip(float(sharpness) / s_ref, 0.0, 1.0))
+
+        raw_conf = 0.30 * feat_score + 0.50 * inlier_score + 0.20 * sharp_score
+        if not tracking_ok:
+            raw_conf *= 0.35
+
+        a = float(np.clip(self.cfg.confidence_ema_alpha, 0.0, 1.0))
+        conf = raw_conf if a <= 0.0 else ((1.0 - a) * float(self._status.confidence) + a * raw_conf)
+
+        self._status = VslamStatus(
+            tracking_ok=bool(tracking_ok),
+            feature_count=int(feature_count),
+            inlier_count=int(inlier_count),
+            sharpness=float(sharpness),
+            confidence=float(conf),
+            high_confidence=bool(tracking_ok and conf >= float(self.cfg.confidence_good_threshold)),
+            blurry=bool(sharpness < float(self.cfg.confidence_min_sharpness)),
+        )
+
+    @staticmethod
+    def _frame_sharpness(gray: np.ndarray) -> float:
+        if gray.size == 0:
+            return 0.0
+        small = cv2.resize(gray, dsize=None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+        lap = cv2.Laplacian(small, cv2.CV_64F)
+        return float(lap.var())
 
     @staticmethod
     def _yaw_from_R(R: np.ndarray) -> float:
