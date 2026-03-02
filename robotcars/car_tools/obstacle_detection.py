@@ -3,13 +3,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple, List
 
-import numpy as np
 import cv2
-from vilib import Vilib
+import numpy as np
 
-from model import Pose, Obstacle, Observations
+from model import Pose
 from coordination.shared_map import SharedMap
 
 
@@ -21,203 +20,230 @@ class CameraIntrinsics:
     cy: float
 
     def K(self) -> np.ndarray:
-        return np.array([[self.fx, 0.0, self.cx],
-                         [0.0, self.fy, self.cy],
-                         [0.0, 0.0, 1.0]], dtype=np.float64)
+        return np.array(
+            [[self.fx, 0.0, self.cx],
+             [0.0, self.fy, self.cy],
+             [0.0, 0.0, 1.0]],
+            dtype=np.float64,
+        )
 
 
 @dataclass
-class SlamConfig:
-    min_inliers: int = 60
-    keyframe_every: int = 10
-    max_matches: int = 500
+class VslamConfig:
+    max_corners: int = 2000
+    quality_level: float = 0.01
+    min_distance: int = 10
+    orb_nfeatures: int = 2000
+
+    ratio_test: float = 0.75
+    keep_best: int = 800
+
+    ransac_prob: float = 0.999
     ransac_thresh: float = 1.0
-    max_new_points_per_kf: int = 800
+    min_inliers: int = 30
+
+    # Monocular scale is unknown; set a small constant step to get “working” XY.
+    # Later, replace with scale from wheel odom / known object / stereo.
+    translation_step: float = 1.0
+
+    # Triangulation filters
+    min_parallax_w: float = 0.005
 
 
-@dataclass
-class RangeConfig:
-    object_width_m: float = 0.05
-    min_box_w_px: int = 12
+class _Frame:
+    __slots__ = ("img_gray", "kps_xy", "des", "pose_Tcw")
+
+    def __init__(self, img_gray: np.ndarray, kps_xy: np.ndarray, des: np.ndarray, pose_Tcw: np.ndarray):
+        self.img_gray = img_gray
+        self.kps_xy = kps_xy          # Nx2 pixel coords
+        self.des = des                # Nx32 ORB descriptors
+        self.pose_Tcw = pose_Tcw      # 4x4 transform (camera wrt world) in our convention
 
 
-@dataclass
-class WorldConfig:
-    grid_scale_m_per_cell: float = 0.05
-    obstacle_radius_grid: float = 2.0
+def _add_ones(xy: np.ndarray) -> np.ndarray:
+    return np.concatenate([xy, np.ones((xy.shape[0], 1), dtype=xy.dtype)], axis=1)
 
 
-class MonoVSLAM:
-    def __init__(self, intr: CameraIntrinsics, cfg: Optional[SlamConfig] = None):
-        self.intr = intr
-        self.K = intr.K()
-        self.cfg = cfg or SlamConfig()
-
-        self.orb = cv2.ORB_create(2000)
-        self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-
-        self._prev_kp = None
-        self._prev_des = None
-
-        self._frame_idx = 0
-        self._last_kf_idx = 0
-        self._kf_kp = None
-        self._kf_des = None
-        self._kf_Twc = np.eye(4, dtype=np.float64)
-
-        self.Twc = np.eye(4, dtype=np.float64)
-        self._new_points: List[Tuple[float, float, float]] = []
-
-    def process(self, frame) -> Tuple[bool, np.ndarray, List[Tuple[float, float, float]]]:
-        self._new_points = []
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        kp, des = self.orb.detectAndCompute(gray, None)
-        if des is None or kp is None or len(kp) < 200:
-            return False, self.Twc, []
-
-        if self._prev_des is None:
-            self._prev_kp, self._prev_des = kp, des
-            return False, self.Twc, []
-
-        matches = self.matcher.match(self._prev_des, des)
-        if len(matches) < 80:
-            self._prev_kp, self._prev_des = kp, des
-            return False, self.Twc, []
-
-        matches = sorted(matches, key=lambda m: m.distance)[: self.cfg.max_matches]
-        pts1 = np.float64([self._prev_kp[m.queryIdx].pt for m in matches])
-        pts2 = np.float64([kp[m.trainIdx].pt for m in matches])
-
-        E, mask = cv2.findEssentialMat(pts1, pts2, self.K, method=cv2.RANSAC, prob=0.999, threshold=self.cfg.ransac_thresh)
-        if E is None or mask is None:
-            self._prev_kp, self._prev_des = kp, des
-            return False, self.Twc, []
-
-        inliers = int(mask.sum())
-        if inliers < self.cfg.min_inliers:
-            self._prev_kp, self._prev_des = kp, des
-            return False, self.Twc, []
-
-        _, R, t, _ = cv2.recoverPose(E, pts1, pts2, self.K)
-
-        Tdelta = np.eye(4, dtype=np.float64)
-        Tdelta[:3, :3] = R
-        Tdelta[:3, 3] = t.reshape(3)
-
-        self.Twc = self.Twc @ Tdelta
-        self._frame_idx += 1
-
-        if (self._frame_idx - self._last_kf_idx) >= self.cfg.keyframe_every:
-            self._triangulate_from_keyframe(kp, des, self.Twc)
-            self._last_kf_idx = self._frame_idx
-            self._kf_kp, self._kf_des, self._kf_Twc = kp, des, self.Twc.copy()
-
-        self._prev_kp, self._prev_des = kp, des
-        return True, self.Twc, self._new_points
-
-    def _triangulate_from_keyframe(self, kp, des, Twc: np.ndarray) -> None:
-        if self._kf_des is None:
-            self._kf_kp, self._kf_des, self._kf_Twc = kp, des, Twc.copy()
-            return
-
-        matches = self.matcher.match(self._kf_des, des)
-        if len(matches) < 80:
-            return
-
-        matches = sorted(matches, key=lambda m: m.distance)[:self.cfg.max_new_points_per_kf]
-        pts1 = np.float64([self._kf_kp[m.queryIdx].pt for m in matches])
-        pts2 = np.float64([kp[m.trainIdx].pt for m in matches])
-
-        P1 = self.K @ self._Rt_from_Twc(self._kf_Twc)
-        P2 = self.K @ self._Rt_from_Twc(Twc)
-
-        Xh = cv2.triangulatePoints(P1, P2, pts1.T, pts2.T)
-        X = (Xh[:3, :] / (Xh[3:4, :] + 1e-9)).T
-
-        for i in range(X.shape[0]):
-            xyz = X[i]
-            if np.isfinite(xyz).all():
-                self._new_points.append((float(xyz[0]), float(xyz[1]), float(xyz[2])))
-
-    @staticmethod
-    def _Rt_from_Twc(Twc: np.ndarray) -> np.ndarray:
-        Rt = np.zeros((3, 4), dtype=np.float64)
-        Rt[:3, :3] = Twc[:3, :3]
-        Rt[:3, 3] = Twc[:3, 3]
-        return Rt
+def _triangulate(Tcw1: np.ndarray, Tcw2: np.ndarray, K: np.ndarray, pts1_px: np.ndarray, pts2_px: np.ndarray) -> np.ndarray:
+    # Use OpenCV triangulation (more compact than the repo’s manual SVD A-matrix loop)
+    P1 = K @ Tcw1[:3, :]
+    P2 = K @ Tcw2[:3, :]
+    pts4 = cv2.triangulatePoints(P1, P2, pts1_px.T, pts2_px.T).T
+    pts4 = pts4 / np.maximum(1e-9, pts4[:, 3:4])
+    return pts4  # Nx4
 
 
-class VslamObstacleDetector:
+class MonocularVSLAM:
+    """
+    Feature-based monocular VO/SLAM front-end inspired by LearnOpenCV’s Monocular SLAM pipeline:
+      - Detect corners -> ORB descriptors
+      - Match consecutive frames
+      - Estimate relative motion (E, recoverPose)
+      - Integrate pose
+      - Triangulate sparse map points
+    """
+
     def __init__(
         self,
         intr: CameraIntrinsics,
         shared_map: SharedMap,
-        slam_cfg: Optional[SlamConfig] = None,
-        range_cfg: Optional[RangeConfig] = None,
-        world_cfg: Optional[WorldConfig] = None,
         car_id: int = 0,
+        cfg: Optional[VslamConfig] = None,
     ):
-        self.intr = intr
+        self.cfg = cfg or VslamConfig()
+        self.K = intr.K()
         self.shared_map = shared_map
-        self.slam_cfg = slam_cfg or SlamConfig()
-        self.slam = MonoVSLAM(intr, slam_cfg)
-        self.range_cfg = range_cfg or RangeConfig()
-        self.world_cfg = world_cfg or WorldConfig()
         self.car_id = car_id
-        self._seq = 0
 
-    def tick(self, frame) -> Optional[Pose]:
-        ok, Twc, new_pts = self.slam.process(frame)
+        self.orb = cv2.ORB_create(nfeatures=self.cfg.orb_nfeatures)
+        self.bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+
+        self._last: Optional[_Frame] = None
+
+        # We maintain Tcw (camera pose wrt world). Start identity.
+        self._Tcw = np.eye(4, dtype=np.float64)
+
+        # Publish an initial pose
+        self._publish_pose()
+
+    def tick(self, frame_bgr_or_rgb: np.ndarray) -> Optional[Pose]:
+        gray = self._to_gray(frame_bgr_or_rgb)
+        pts_xy, des = self._extract(gray)
+        if pts_xy is None or des is None or len(pts_xy) < 50:
+            self._publish_pose()
+            return self.shared_map.poses.get(self.car_id)
+
+        cur = _Frame(gray, pts_xy, des, self._Tcw.copy())
+
+        if self._last is None:
+            self._last = cur
+            self._publish_pose()
+            return self.shared_map.poses.get(self.car_id)
+
+        ok, idx_cur, idx_last, R, t = self._estimate_motion(cur, self._last)
         if not ok:
-            return None
+            self._last = cur
+            self._publish_pose()
+            return self.shared_map.poses.get(self.car_id)
 
-        pose = self._pose_from_Twc(Twc)
-        self.shared_map.merge_slam_update(self.car_id, pose, new_pts)
+        # Scale translation (monocular ambiguity)
+        t = t.reshape(3)
+        t_norm = float(np.linalg.norm(t))
+        if t_norm > 1e-9:
+            t = (t / t_norm) * float(self.cfg.translation_step)
 
-        obs = self._rgb_obstacle_observation(Twc)
-        if obs is not None:
-            self.shared_map.merge_observations(self.car_id, obs, pose)
+        # Build relative transform: T_cur_last
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = R
+        T[:3, 3] = t
 
-        return pose
+        # Repo does: f1.pose = Rt @ f2.pose (their convention) :contentReference[oaicite:5]{index=5}
+        # We maintain Tcw; integrate as: Tcw_new = T_cur_last @ Tcw_last
+        self._Tcw = T @ self._Tcw
 
-    def _pose_from_Twc(self, Twc: np.ndarray) -> Pose:
-        x_m = float(Twc[0, 3])
-        y_m = float(Twc[1, 3])
-        yaw = float(math.atan2(Twc[1, 0], Twc[0, 0]))
+        # Triangulate sparse points for mapping/debug
+        pts_cur = cur.kps_xy[idx_cur].astype(np.float64)
+        pts_last = self._last.kps_xy[idx_last].astype(np.float64)
+        pts4 = _triangulate(self._Tcw, self._last.pose_Tcw, self.K, pts_cur, pts_last)
 
-        x_grid = x_m / self.world_cfg.grid_scale_m_per_cell
-        y_grid = y_m / self.world_cfg.grid_scale_m_per_cell
-        return Pose(x=float(x_grid), y=float(y_grid), theta=float(yaw))
+        good = (np.abs(pts4[:, 3]) > self.cfg.min_parallax_w) & (pts4[:, 2] > 0)
+        pts3 = pts4[good][:, :3]
+        if pts3.shape[0] > 0:
+            self.shared_map.add_map_points(pts3)
 
-    def _rgb_obstacle_observation(self, Twc: np.ndarray) -> Optional[Observations]:
-        color_n = int(Vilib.detect_obj_parameter.get("color_n", 0) or 0)
-        if color_n <= 0:
-            return None
+        self._last = cur
+        self._publish_pose()
+        return self.shared_map.poses.get(self.car_id)
 
-        box_w = int(Vilib.detect_obj_parameter.get("color_w", 0) or 0)
-        if box_w < self.range_cfg.min_box_w_px:
-            return None
+    # ---------- Internals ----------
 
-        u = float(Vilib.detect_obj_parameter.get("color_x", 0) or 0)
-        v = float(Vilib.detect_obj_parameter.get("color_y", 0) or 0)
+    def _publish_pose(self) -> None:
+        # Convert Tcw into a 2D pose (x,y,theta). We’ll treat world axes:
+        # x = Tcw[0,3], y = Tcw[1,3], theta from yaw of rotation.
+        x = float(self._Tcw[0, 3])
+        y = float(self._Tcw[1, 3])
+        theta = self._yaw_from_R(self._Tcw[:3, :3])
+        self.shared_map.set_pose(self.car_id, Pose(x=x, y=y, theta=theta))
 
-        z_m = (self.intr.fx * self.range_cfg.object_width_m) / float(box_w)
+    @staticmethod
+    def _yaw_from_R(R: np.ndarray) -> float:
+        # yaw from rotation matrix (Z-up-ish assumption). Works “okay” for small pitch/roll.
+        return float(math.atan2(R[1, 0], R[0, 0]))
 
-        x_cam = (u - self.intr.cx) * z_m / self.intr.fx
-        y_cam = (v - self.intr.cy) * z_m / self.intr.fy
-        Pc = np.array([x_cam, y_cam, z_m], dtype=np.float64).reshape(3, 1)
+    @staticmethod
+    def _to_gray(img: np.ndarray) -> np.ndarray:
+        if img.ndim == 2:
+            return img
+        # Try BGR->GRAY first; if image is RGB, result is still usable for ORB
+        return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        Pw = (Twc[:3, :3] @ Pc) + Twc[:3, 3:4]
-        ox_grid = float(Pw[0, 0] / self.world_cfg.grid_scale_m_per_cell)
-        oy_grid = float(Pw[1, 0] / self.world_cfg.grid_scale_m_per_cell)
-
-        self._seq += 1
-        ob = Obstacle(
-            obstacle_id=f"rgb_{self.car_id}_{self._seq}",
-            x=ox_grid,
-            y=oy_grid,
-            radius=float(self.world_cfg.obstacle_radius_grid),
-            is_moving=True,
+    def _extract(self, gray: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        pts = cv2.goodFeaturesToTrack(
+            gray,
+            maxCorners=self.cfg.max_corners,
+            qualityLevel=self.cfg.quality_level,
+            minDistance=self.cfg.min_distance,
         )
-        return Observations(obstacles=[ob])
+        if pts is None:
+            return None, None
+
+        kps = [cv2.KeyPoint(float(p[0][0]), float(p[0][1]), 20) for p in pts]
+        kps, des = self.orb.compute(gray, kps)
+        if des is None or len(kps) == 0:
+            return None, None
+
+        xy = np.array([kp.pt for kp in kps], dtype=np.float32)
+        return xy, des
+
+    def _estimate_motion(
+        self,
+        cur: _Frame,
+        last: _Frame,
+    ) -> Tuple[bool, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        matches = self.bf.knnMatch(cur.des, last.des, k=2)
+
+        good = []
+        idx_cur = []
+        idx_last = []
+        for m, n in matches:
+            if m.distance < self.cfg.ratio_test * n.distance:
+                idx_cur.append(m.queryIdx)
+                idx_last.append(m.trainIdx)
+                good.append(m)
+
+        if len(good) < 8:
+            return False, np.array([]), np.array([]), np.eye(3), np.zeros((3, 1))
+
+        # Keep best-N
+        if len(good) > self.cfg.keep_best:
+            order = np.argsort([m.distance for m in good])[: self.cfg.keep_best]
+            idx_cur = [idx_cur[i] for i in order]
+            idx_last = [idx_last[i] for i in order]
+
+        pts1 = cur.kps_xy[np.array(idx_cur)].astype(np.float64)
+        pts2 = last.kps_xy[np.array(idx_last)].astype(np.float64)
+
+        E, inliers = cv2.findEssentialMat(
+            pts1,
+            pts2,
+            self.K,
+            method=cv2.RANSAC,
+            prob=self.cfg.ransac_prob,
+            threshold=self.cfg.ransac_thresh,
+        )
+        if E is None or inliers is None:
+            return False, np.array([]), np.array([]), np.eye(3), np.zeros((3, 1))
+
+        inliers = inliers.reshape(-1).astype(bool)
+        if int(inliers.sum()) < self.cfg.min_inliers:
+            return False, np.array([]), np.array([]), np.eye(3), np.zeros((3, 1))
+
+        pts1_in = pts1[inliers]
+        pts2_in = pts2[inliers]
+
+        _, R, t, _ = cv2.recoverPose(E, pts1_in, pts2_in, self.K)
+
+        idx_cur_in = np.array(idx_cur, dtype=np.int64)[inliers]
+        idx_last_in = np.array(idx_last, dtype=np.int64)[inliers]
+
+        return True, idx_cur_in, idx_last_in, R, t

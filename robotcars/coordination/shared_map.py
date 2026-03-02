@@ -24,6 +24,14 @@ class SharedMap:
 
     _static_grid: Optional[np.ndarray] = None
 
+    def set_pose(self, car_id: int, pose: Pose) -> None:
+        self.poses[car_id] = pose
+
+    def add_map_points(self, pts3: np.ndarray) -> None:
+        if pts3 is None or not isinstance(pts3, np.ndarray) or pts3.size == 0:
+            return
+        self.map_points.append(pts3.astype(np.float32))
+
     def reset_for_scenario(self, scenario: Scenario) -> None:
         self.obstacles.clear()
         self.poses.clear()
