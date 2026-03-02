@@ -144,7 +144,7 @@ class MonocularVSLAM:
         return None if self._dbg_matches_bgr is None else self._dbg_matches_bgr
 
     # Main Tick()
-    def tick(self, frame_bgr_or_rgb: np.ndarray) -> Optional[Pose]:
+    def tick(self, frame_bgr_or_rgb: np.ndarray, translation_step: Optional[float] = None) -> Optional[Pose]:
         gray = self._to_gray(frame_bgr_or_rgb)
         pts_xy, des = self._extract(gray)
 
@@ -180,8 +180,12 @@ class MonocularVSLAM:
         # Scale translation (monocular ambiguity)
         t = t.reshape(3)
         t_norm = float(np.linalg.norm(t))
-        if t_norm > 1e-12:
-            t = (t / t_norm) * float(self.cfg.translation_step)
+
+        step = float(self.cfg.translation_step if translation_step is None else translation_step)
+        if t_norm > 1e-12 and step > 0.0:
+            t = (t / t_norm) * step
+        else:
+            t = np.zeros(3, dtype=np.float64)
 
         # Build relative transform T_cur_last (camera last -> camera cur), but in SE(3) form.
         T_rel = np.eye(4, dtype=np.float64)
@@ -212,7 +216,12 @@ class MonocularVSLAM:
         Xw_good = Xw[good]
 
         if Xw_good.shape[0] > 0:
-            self.shared_map.add_map_points(Xw_good)
+            # Store points in the same nav frame as pose:
+            # nav_x = forward = Z
+            # nav_y = left    = -X
+            # nav_z = up      = -Y
+            Xnav = np.column_stack((Xw_good[:, 2], -Xw_good[:, 0], -Xw_good[:, 1])).astype(np.float32)
+            self.shared_map.add_map_points(Xnav)
 
         self._last = cur
         self._publish_pose()
@@ -222,13 +231,28 @@ class MonocularVSLAM:
 
     def _publish_pose(self) -> None:
         """
-        We maintain Tcw = world->camera.
-        The camera position in world coordinates is Twc translation, where Twc = inv(Tcw).
+        +X right, +Y down, +Z forward  (OpenCV convention)
+
+        For a ground robot we publish a planar navigation pose:
+        x = forward  (world Z)
+        y = left     (-world X)
+        theta = heading from camera forward axis projected onto the XZ plane (left-positive)
         """
         Twc = self._invert_se3(self._Tcw)
-        x = float(Twc[0, 3])
-        y = float(Twc[1, 3])
-        theta = self._yaw_from_R(Twc[:3, :3])
+        p = Twc[:3, 3]
+        Rwc = Twc[:3, :3]
+
+        # Planar position (forward/left)
+        x = float(p[2])        # forward
+        y = float(-p[0])       # left
+
+        # Heading: use camera forward axis in world, projected to XZ plane
+        fwd = Rwc[:, 2]        # camera +Z axis expressed in world coords
+        if abs(fwd[0]) + abs(fwd[2]) > 1e-9:
+            theta = float(math.atan2(-fwd[0], fwd[2]))  # left-positive
+        else:
+            theta = 0.0
+
         self.shared_map.set_pose(self.car_id, Pose(x=x, y=y, theta=theta))
 
     @staticmethod

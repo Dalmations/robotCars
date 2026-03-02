@@ -1,41 +1,44 @@
 from __future__ import annotations
 
-import json
-import math
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Literal
 
 import numpy as np
+import cv2
 from vilib import Vilib
 
-from model import Observations, Obstacle, Pose
+
+ColorOrder = Literal["rgb", "bgr"]
 
 
 @dataclass
 class CameraConfig:
-    vflip: bool = False
-    hflip: bool = False
     display_local: bool = False
-    display_web: bool = True
+    display_web: bool = False
 
     frame_size: Tuple[int, int] = (640, 480)
 
-    forward_distance: float = 4.0
-    obstacle_radius: float = 2.0
+    # Reduce capture FPS to lower CPU load
+    # Vilib defaults preview_config.controls = {'FrameRate': 60}
+    frame_rate: int = 30
 
-    min_seconds_between_reports: float = 0.5
-
-    # avoid the imencode crash by waiting for first frame
+    # Wait for first frame
     startup_wait_seconds: float = 2.5
 
 
 class PiCarXCamera:
+    """
+    Vilib is internally configured as RGB888 + capture_array(), so frames are RGB.
+    """
+
     def __init__(self, cfg: Optional[CameraConfig] = None):
         self.cfg = cfg or CameraConfig()
         self._started = False
-        self._last_report_t = 0.0
-        self._seq = 0
+
+    @property
+    def color_order(self) -> ColorOrder:
+        return self.cfg.output_color_order
 
     def start(self) -> None:
         if self._started:
@@ -43,12 +46,17 @@ class PiCarXCamera:
 
         Vilib.camera_start(vflip=self.cfg.vflip, hflip=self.cfg.hflip, size=self.cfg.frame_size)
 
-        # Wait until Vilib.img is a real numpy frame before enabling display/web
+        # Set frame rate to reduce load
+        try:
+            Vilib.set_controls({"FrameRate": int(self.cfg.frame_rate)})
+        except Exception:
+            pass
+
+        # Wait until Vilib.img becomes a valid numpy array
         t0 = time.time()
         while True:
             img = getattr(Vilib, "img", None)
             if isinstance(img, np.ndarray) and img.size > 0:
-                # ensure flask_img is also a numpy array before web streaming thread starts
                 try:
                     Vilib.flask_img = img
                 except Exception:
@@ -67,6 +75,11 @@ class PiCarXCamera:
     def stop(self) -> None:
         if not self._started:
             return
+        try:
+            Vilib.imshow_flag = False
+            Vilib.web_display_flag = False
+        except Exception:
+            pass
 
         try:
             Vilib.camera_close()
@@ -77,7 +90,7 @@ class PiCarXCamera:
 
     def read(self) -> Optional[np.ndarray]:
         """
-        Returns a BGR/RGB frame from Vilib
+        Returns a frame
         """
         if not self._started:
             return None
@@ -86,4 +99,9 @@ class PiCarXCamera:
         if not isinstance(img, np.ndarray) or img.size == 0:
             return None
 
-        return img.copy()
+        # Ensure uint8 contiguous
+        if img.dtype != np.uint8:
+            img = np.clip(img, 0, 255).astype(np.uint8)
+        frame = np.ascontiguousarray(img)
+
+        return frame

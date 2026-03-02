@@ -19,7 +19,7 @@ class MotorConfig:
     steering_slew_deg_per_s: float = 0.0  # e.g. 180.0 = max 180 deg/s change
 
     # Motion
-    speed: int = 80                    # 0..100-ish
+    speed: int = 50                    # 0..100
     step_seconds: float = 0.20         # "one step" time (used by step_forward)
 
     # Safety / timing
