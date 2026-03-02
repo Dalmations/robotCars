@@ -139,7 +139,6 @@ def main() -> None:
 
     slam_cfg = VslamConfig(
         translation_step=0.2,              # will be overridden per tick
-        input_color_order=cam.color_order, # "rgb" from Vilib :contentReference[oaicite:6]{index=6}
         debug_draw_keypoints=False,
         debug_draw_matches=False,
         # (keep other defaults)

@@ -50,9 +50,6 @@ class VslamConfig:
     min_depth: float = 0.05
     max_depth: float = 200.0
 
-    # Input frames:
-    input_color_order: str = "rgb"  # "bgr" or "rgb"
-
     # Debug drawing
     debug_draw_keypoints: bool = False
     debug_draw_matches: bool = False
@@ -274,11 +271,7 @@ class MonocularVSLAM:
         if img.ndim == 2:
             g = img
         else:
-            order = (self.cfg.input_color_order or "bgr").lower().strip()
-            if order == "rgb":
-                g = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-            else:
-                g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            g = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
         # Ensure contiguous uint8 for OpenCV feature extractors
         if g.dtype != np.uint8:
             g = np.clip(g, 0, 255).astype(np.uint8)

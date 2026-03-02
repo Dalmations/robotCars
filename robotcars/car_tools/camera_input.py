@@ -36,15 +36,11 @@ class PiCarXCamera:
         self.cfg = cfg or CameraConfig()
         self._started = False
 
-    @property
-    def color_order(self) -> ColorOrder:
-        return self.cfg.output_color_order
-
     def start(self) -> None:
         if self._started:
             return
 
-        Vilib.camera_start(vflip=self.cfg.vflip, hflip=self.cfg.hflip, size=self.cfg.frame_size)
+        Vilib.camera_start(size=self.cfg.frame_size)
 
         # Set frame rate to reduce load
         try:
