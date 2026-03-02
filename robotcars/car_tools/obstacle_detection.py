@@ -289,7 +289,7 @@ class MonocularVSLAM:
           ok, idx_cur_inliers, idx_last_inliers, R, t
         where R,t map points in last camera coords into cur camera coords.
         """
-        # IMPORTANT: match last -> cur so queryIdx refers to last, trainIdx refers to cur
+        # match last -> cur so queryIdx refers to last, trainIdx refers to cur
         matches_knn = self.bf.knnMatch(last.des, cur.des, k=2)
 
         idx_last: List[int] = []
@@ -297,7 +297,7 @@ class MonocularVSLAM:
         dists: List[float] = []
 
         for pair in matches_knn:
-            # Robustness: some descriptors can return <2 neighbors
+            # Pair matches to new frame
             if len(pair) < 2:
                 continue
             m, n = pair
@@ -345,7 +345,6 @@ class MonocularVSLAM:
         return True, idx_cur_in, idx_last_in, R, t
 
     # Triangulation filters
-
     def _parallax_norm(self, pts1_px: np.ndarray, pts2_px: np.ndarray) -> np.ndarray:
         """
         Approx parallax magnitude in *normalized image coordinates*.
@@ -380,7 +379,6 @@ class MonocularVSLAM:
         return finite & in_front & not_too_far
 
     # Debug rendering
-
     @staticmethod
     def _render_keypoints(gray: np.ndarray, pts_xy: np.ndarray) -> np.ndarray:
         """

@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple, Any
 
 import numpy as np
 
@@ -21,90 +21,135 @@ class FollowerConfig:
     goal_tolerance: float = 2.0      # grid units
     max_run_seconds: float = 45.0
 
+    # Alignment knobs
+    pose_frame: str = "grid"         # grid for A* paths, world in SLAM/world coords
+    steer_sign: float = 1.0          # set -1.0 if steering is mirrored
+    max_steer_deg: float = 35.0      # PiCar-X examples use ~35 deg
+
 
 class PathFollower:
     def __init__(self, motor: MotorController, cfg: Optional[FollowerConfig] = None):
         self.motor = motor
         self.cfg = cfg or FollowerConfig()
 
-    def follow(self, path: Path) -> None:
-        # point-to-point headings
-        wps = path.waypoints
-        if len(wps) < 2:
-            return
-        for i in range(1, len(wps)):
-            prev = wps[i - 1]
-            cur = wps[i]
-            dx = cur.x - prev.x
-            dy = cur.y - prev.y
-            if dx == 0 and dy == 0:
-                continue
-            heading = math.atan2(dy, dx)
-            steer_deg = float(np.rad2deg(heading))
-            self.motor.set_steering(steer_deg)
-            self.motor.step_forward()
-        self.motor.mark_reached()
-
     def follow_with_slam(
         self,
         path: Path,
         shared_map: SharedMap,
         car_id: int = 0,
-        camera=None,
-        slam_detector=None,
+        camera: Any = None,
+        slam_detector: Any = None,
     ) -> None:
+        """
+        Closed-loop pure pursuit using pose from SLAM (via shared_map).
+        """
         if len(path.waypoints) < 2:
             return
 
         t0 = time.time()
-        last_pose: Optional[Pose] = None
+        last_pose_world: Optional[Pose] = None
 
         try:
             while True:
                 if (time.time() - t0) > self.cfg.max_run_seconds:
                     break
 
-                # Update pose from SLAM
+                # --- Update pose from SLAM ---
                 if camera is not None and slam_detector is not None:
-                    frame = camera.read()
+                    frame = self._grab_frame(camera)
                     if frame is not None:
                         pose = slam_detector.tick(frame)
                         if pose is not None:
-                            last_pose = pose
+                            last_pose_world = pose  # slam publishes into shared_map too
 
-                pose = shared_map.poses.get(car_id) or last_pose
+                # Get pose in the frame we want to drive in
+                pose = shared_map.get_pose(car_id, frame=self.cfg.pose_frame)  # type: ignore[arg-type]
+                if pose is None and last_pose_world is not None:
+                    # Fallback: if shared_map not updated for some reason
+                    if self.cfg.pose_frame == "world":
+                        pose = last_pose_world
+                    else:
+                        # Fallback world->grid
+                        if hasattr(shared_map, "world_to_grid_f"):
+                            gx, gy = shared_map.world_to_grid_f(last_pose_world.x, last_pose_world.y)  # type: ignore[attr-defined]
+                            pose = Pose(x=float(gx), y=float(gy), theta=float(last_pose_world.theta))
+
                 if pose is None:
                     time.sleep(self.cfg.dt)
                     continue
 
-                # Stop if near goal
+                # --- Goal check ---
                 goal = path.waypoints[-1]
                 if self._dist(pose.x, pose.y, goal.x, goal.y) <= self.cfg.goal_tolerance:
                     self.motor.mark_reached()
                     break
 
-                # Pure Pursuit target
-                target = self._lookahead_point(path, pose, self.cfg.lookahead)
-                delta_rad = self._pure_pursuit_delta(pose, target_x=target[0], target_y=target[1])
+                # --- Pure Pursuit target ---
+                tx, ty = self._lookahead_point(path, pose, self.cfg.lookahead)
+                delta_rad = self._pure_pursuit_delta(pose, target_x=tx, target_y=ty)
 
                 steer_deg = float(np.rad2deg(delta_rad))
+                steer_deg = float(np.clip(self.cfg.steer_sign * steer_deg, -self.cfg.max_steer_deg, self.cfg.max_steer_deg))
+
                 self.motor.set_steering(steer_deg)
                 self.motor.forward_for(self.cfg.dt)
 
         finally:
             self.motor.stop()
 
+    # ---------------- Camera helpers ----------------
 
-    # Pure Pursuit 
-    def _lookahead_point(self, path: Path, pose: Pose, Ld: float) -> tuple[float, float]:
-        x, y = pose.x, pose.y
-        best = (path.waypoints[-1].x, path.waypoints[-1].y)
+    @staticmethod
+    def _grab_frame(camera: Any):
+        if hasattr(camera, "read"):
+            out = camera.read()
+            if isinstance(out, tuple) and len(out) == 2:
+                ret, frame = out
+                return frame if ret else None
+            return out
+        if hasattr(camera, "capture_array"):
+            return camera.capture_array()
+        return None
 
-        # Find the first waypoint at least Ld away; if none, use last waypoint
-        for wp in path.waypoints:
-            if self._dist(x, y, wp.x, wp.y) >= Ld:
-                return (wp.x, wp.y)
-        return best
+    # ---------------- Pure Pursuit ----------------
+
+    def _lookahead_point(self, path: Path, pose: Pose, Ld: float) -> Tuple[float, float]:
+        """
+        Pick a lookahead point starting from the car's closest waypoint index
+        and move forward until distance >= Ld.
+        """
+        wps = path.waypoints
+        if not wps:
+            return (pose.x, pose.y)
+        if len(wps) == 1:
+            return (wps[0].x, wps[0].y)
+
+        # Find closest waypoint index
+        px, py = pose.x, pose.y
+        d2 = [(wp.x - px) ** 2 + (wp.y - py) ** 2 for wp in wps]
+        i0 = int(np.argmin(d2))
+
+        # Walk forward accumulating arc-length
+        dist_acc = 0.0
+        for i in range(i0, len(wps) - 1):
+            x0, y0 = wps[i].x, wps[i].y
+            x1, y1 = wps[i + 1].x, wps[i + 1].y
+            seg = math.hypot(x1 - x0, y1 - y0)
+            if seg < 1e-9:
+                continue
+
+            if dist_acc + seg >= Ld:
+                # Interpolate within this segment
+                remaining = Ld - dist_acc
+                u = float(remaining / seg)
+                tx = x0 + u * (x1 - x0)
+                ty = y0 + u * (y1 - y0)
+                return (tx, ty)
+
+            dist_acc += seg
+
+        # If path shorter than lookahead, use final waypoint
+        return (wps[-1].x, wps[-1].y)
 
     def _pure_pursuit_delta(self, pose: Pose, target_x: float, target_y: float) -> float:
         dx = target_x - pose.x
@@ -116,8 +161,6 @@ class PathFollower:
         Ld = max(1e-6, self._dist(pose.x, pose.y, target_x, target_y))
         L = max(1e-6, float(self.cfg.wheelbase))
 
-        # Bicycle pure pursuit:
-        # delta = atan2(2*L*sin(alpha), Ld)
         return math.atan2(2.0 * L * math.sin(alpha), Ld)
 
     @staticmethod

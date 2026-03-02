@@ -8,11 +8,12 @@ from model import TargetPoint
 from car_tools.motor_controller import MotorController, MotorConfig
 from car_tools.picarx_path_follower import PathFollower, FollowerConfig
 from car_tools.camera_input import PiCarXCamera, CameraConfig
-from car_tools.obstacle_detection import VslamObstacleDetector, CameraIntrinsics
+from car_tools.obstacle_detection import MonocularVSLAM, CameraIntrinsics, VslamConfig
 
 
 def main() -> None:
     shared_map = SharedMap()
+    shared_map.configure_grid(size=(50,50), resolution=1.0, center_world=(0.0, 0.0))
     planner = MovementPlanner(planning_cfg=None, world_size=(50, 50))
 
     motor = MotorController(MotorConfig(speed=35, step_seconds=0.18))
@@ -24,27 +25,26 @@ def main() -> None:
     cam = PiCarXCamera(CameraConfig(
         display_web=False,
         display_local=False,
-        obstacle_color="red",
         frame_size=(640, 480),
     ))
     cam.start()
 
     intr = CameraIntrinsics(fx=628.0, fy=642.0, cx=320.0, cy=240.0)
-    det = VslamObstacleDetector(intr=intr, shared_map=shared_map, car_id=0)
+    cfg = VslamConfig(
+    debug_draw_keypoints=True,
+    input_color_order="rgb",
+)
+
+    slam = MonocularVSLAM(intr=intr, shared_map=shared_map, car_id=0, cfg=cfg)
 
     target = TargetPoint(x=45.0, y=45.0)
 
     try:
-        path = planner.plan_to_target(target=target, shared_map=shared_map)
+        path = shared_map.plan_path_to(target=target)
         print(f"Planned path waypoints: {len(path.waypoints)}")
 
-        follower.follow_with_slam(
-            path=path,
-            shared_map=shared_map,
-            car_id=0,
-            camera=cam,
-            slam_detector=det,
-        )
+        follower = PathFollower(motor, FollowerConfig(pose_frame="grid"))
+        follower.follow_with_slam(path, shared_map, car_id=0, camera=cam, slam_detector=slam)
     finally:
         cam.stop()
         motor.stop()

@@ -3,7 +3,7 @@ from car_tools.obstacle_detection import MonocularVSLAM, CameraIntrinsics, Vslam
 from coordination.shared_map import SharedMap
 
 shared_map = SharedMap()
-
+shared_map.configure_grid(size=(50,50), resolution=1.0, center_world=(0.0, 0.0))
 cam = PiCarXCamera(CameraConfig(display_web=False))
 cam.start()
 
