@@ -60,12 +60,27 @@ class VslamConfig:
     # Pose smoothing (EMA). 0 disables smoothing, 0.1-0.3 typical.
     pose_ema_alpha: float = 0.2
 
+    # Input frame color order from camera pipeline ("rgb" or "bgr")
+    input_color_order: str = "rgb"
+
     # Confidence gating thresholds
     confidence_ema_alpha: float = 0.25
     confidence_good_threshold: float = 0.55
     confidence_min_features: int = 140
     confidence_min_inliers: int = 45
     confidence_min_sharpness: float = 45.0
+    confidence_min_contrast: float = 25.0
+
+    # Preprocessing for low-light / low-contrast scenes
+    gray_use_clahe: bool = True
+    gray_clahe_clip_limit: float = 2.2
+    gray_clahe_tile_size: int = 8
+    gray_gamma: float = 1.0
+    gray_unsharp_amount: float = 0.0
+
+    # Blue-cast correction (simple gray-world balancing)
+    auto_white_balance: bool = True
+    max_channel_gain: float = 1.8
 
 
 @dataclass
@@ -74,6 +89,11 @@ class VslamStatus:
     feature_count: int = 0
     inlier_count: int = 0
     sharpness: float = 0.0
+    contrast: float = 0.0
+    mean_r: float = 0.0
+    mean_g: float = 0.0
+    mean_b: float = 0.0
+    blue_ratio: float = 1.0
     confidence: float = 0.0
     high_confidence: bool = False
     blurry: bool = True
@@ -145,6 +165,9 @@ class MonocularVSLAM:
         self._last: Optional[_Frame] = None
         self._pose_filt: Optional[Pose] = None
         self._status = VslamStatus()
+        self._clahe: Optional[cv2.CLAHE] = None
+        self._gamma_lut: Optional[np.ndarray] = None
+        self._gamma_lut_value: float = -1.0
 
         # Maintain Tcw (world->camera). Start at identity.
         self._Tcw = np.eye(4, dtype=np.float64)
@@ -173,6 +196,11 @@ class MonocularVSLAM:
             feature_count=int(s.feature_count),
             inlier_count=int(s.inlier_count),
             sharpness=float(s.sharpness),
+            contrast=float(s.contrast),
+            mean_r=float(s.mean_r),
+            mean_g=float(s.mean_g),
+            mean_b=float(s.mean_b),
+            blue_ratio=float(s.blue_ratio),
             confidence=float(s.confidence),
             high_confidence=bool(s.high_confidence),
             blurry=bool(s.blurry),
@@ -180,9 +208,10 @@ class MonocularVSLAM:
 
     # Main Tick()
     def tick(self, frame_bgr_or_rgb: np.ndarray, translation_step: Optional[float] = None) -> Optional[Pose]:
-        gray = self._to_gray(frame_bgr_or_rgb)
+        gray, frame_stats = self._to_gray(frame_bgr_or_rgb)
         pts_xy, des = self._extract(gray)
         sharpness = self._frame_sharpness(gray)
+        contrast = self._frame_contrast(gray)
         feature_count = 0 if pts_xy is None else int(len(pts_xy))
 
         # Refresh keypoint debug view
@@ -198,6 +227,11 @@ class MonocularVSLAM:
                 feature_count=feature_count,
                 inlier_count=0,
                 sharpness=sharpness,
+                contrast=contrast,
+                mean_r=frame_stats["mean_r"],
+                mean_g=frame_stats["mean_g"],
+                mean_b=frame_stats["mean_b"],
+                blue_ratio=frame_stats["blue_ratio"],
             )
             self._publish_pose()
             return self.shared_map.poses.get(self.car_id)
@@ -212,6 +246,11 @@ class MonocularVSLAM:
                 feature_count=feature_count,
                 inlier_count=0,
                 sharpness=sharpness,
+                contrast=contrast,
+                mean_r=frame_stats["mean_r"],
+                mean_g=frame_stats["mean_g"],
+                mean_b=frame_stats["mean_b"],
+                blue_ratio=frame_stats["blue_ratio"],
             )
             self._publish_pose()
             return self.shared_map.poses.get(self.car_id)
@@ -228,6 +267,11 @@ class MonocularVSLAM:
                 feature_count=feature_count,
                 inlier_count=0,
                 sharpness=sharpness,
+                contrast=contrast,
+                mean_r=frame_stats["mean_r"],
+                mean_g=frame_stats["mean_g"],
+                mean_b=frame_stats["mean_b"],
+                blue_ratio=frame_stats["blue_ratio"],
             )
             self._publish_pose()
             return self.shared_map.poses.get(self.car_id)
@@ -283,6 +327,11 @@ class MonocularVSLAM:
             feature_count=feature_count,
             inlier_count=int(idx_cur.shape[0]),
             sharpness=sharpness,
+            contrast=contrast,
+            mean_r=frame_stats["mean_r"],
+            mean_g=frame_stats["mean_g"],
+            mean_b=frame_stats["mean_b"],
+            blue_ratio=frame_stats["blue_ratio"],
         )
         self._last = cur
         self._publish_pose()
@@ -355,16 +404,23 @@ class MonocularVSLAM:
         feature_count: int,
         inlier_count: int,
         sharpness: float,
+        contrast: float,
+        mean_r: float,
+        mean_g: float,
+        mean_b: float,
+        blue_ratio: float,
     ) -> None:
         f_ref = max(1.0, float(self.cfg.confidence_min_features))
         i_ref = max(1.0, float(self.cfg.confidence_min_inliers))
         s_ref = max(1e-6, float(self.cfg.confidence_min_sharpness))
+        c_ref = max(1e-6, float(self.cfg.confidence_min_contrast))
 
         feat_score = float(np.clip(float(feature_count) / f_ref, 0.0, 1.0))
         inlier_score = float(np.clip(float(inlier_count) / i_ref, 0.0, 1.0))
         sharp_score = float(np.clip(float(sharpness) / s_ref, 0.0, 1.0))
+        contrast_score = float(np.clip(float(contrast) / c_ref, 0.0, 1.0))
 
-        raw_conf = 0.30 * feat_score + 0.50 * inlier_score + 0.20 * sharp_score
+        raw_conf = 0.25 * feat_score + 0.45 * inlier_score + 0.20 * sharp_score + 0.10 * contrast_score
         if not tracking_ok:
             raw_conf *= 0.35
 
@@ -376,6 +432,11 @@ class MonocularVSLAM:
             feature_count=int(feature_count),
             inlier_count=int(inlier_count),
             sharpness=float(sharpness),
+            contrast=float(contrast),
+            mean_r=float(mean_r),
+            mean_g=float(mean_g),
+            mean_b=float(mean_b),
+            blue_ratio=float(blue_ratio),
             confidence=float(conf),
             high_confidence=bool(tracking_ok and conf >= float(self.cfg.confidence_good_threshold)),
             blurry=bool(sharpness < float(self.cfg.confidence_min_sharpness)),
@@ -390,19 +451,127 @@ class MonocularVSLAM:
         return float(lap.var())
 
     @staticmethod
+    def _frame_contrast(gray: np.ndarray) -> float:
+        if gray.size == 0:
+            return 0.0
+        return float(np.std(gray))
+
+    @staticmethod
     def _yaw_from_R(R: np.ndarray) -> float:
         # yaw from rotation matrix (Z-up-ish assumption). Works “okay” for small pitch/roll.
         return float(math.atan2(R[1, 0], R[0, 0]))
 
-    def _to_gray(self, img: np.ndarray) -> np.ndarray:
+    def _to_gray(self, img: np.ndarray) -> Tuple[np.ndarray, dict]:
+        stats = {"mean_r": 0.0, "mean_g": 0.0, "mean_b": 0.0, "blue_ratio": 1.0}
+
         if img.ndim == 2:
             g = img
         else:
-            g = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        # Ensure contiguous uint8 for OpenCV feature extractors
+            c = img
+            if c.dtype != np.uint8:
+                c = np.clip(c, 0, 255).astype(np.uint8)
+            c = np.ascontiguousarray(c)
+
+            order = str(self.cfg.input_color_order).lower()
+            if order == "bgr":
+                b = c[:, :, 0].astype(np.float32)
+                g_ch = c[:, :, 1].astype(np.float32)
+                r = c[:, :, 2].astype(np.float32)
+            else:
+                r = c[:, :, 0].astype(np.float32)
+                g_ch = c[:, :, 1].astype(np.float32)
+                b = c[:, :, 2].astype(np.float32)
+
+            mean_r = float(r.mean())
+            mean_g = float(g_ch.mean())
+            mean_b = float(b.mean())
+            blue_ratio = float(mean_b / max(1.0, 0.5 * (mean_r + mean_g)))
+            stats = {"mean_r": mean_r, "mean_g": mean_g, "mean_b": mean_b, "blue_ratio": blue_ratio}
+
+            if self.cfg.auto_white_balance:
+                c = self._gray_world_balance(c, order=order, max_gain=float(self.cfg.max_channel_gain))
+
+            if order == "bgr":
+                g = cv2.cvtColor(c, cv2.COLOR_BGR2GRAY)
+            else:
+                g = cv2.cvtColor(c, cv2.COLOR_RGB2GRAY)
+
         if g.dtype != np.uint8:
             g = np.clip(g, 0, 255).astype(np.uint8)
-        return np.ascontiguousarray(g)
+
+        gamma = float(self.cfg.gray_gamma)
+        if abs(gamma - 1.0) > 1e-3:
+            lut = self._gamma_lut_for(gamma)
+            g = cv2.LUT(g, lut)
+
+        if self.cfg.gray_use_clahe:
+            tile = max(2, int(self.cfg.gray_clahe_tile_size))
+            if self._clahe is None:
+                self._clahe = cv2.createCLAHE(
+                    clipLimit=float(self.cfg.gray_clahe_clip_limit),
+                    tileGridSize=(tile, tile),
+                )
+            g = self._clahe.apply(g)
+
+        amount = float(self.cfg.gray_unsharp_amount)
+        if amount > 1e-3:
+            blur = cv2.GaussianBlur(g, (0, 0), sigmaX=1.0, sigmaY=1.0)
+            g = cv2.addWeighted(g, 1.0 + amount, blur, -amount, 0)
+
+        return np.ascontiguousarray(g), stats
+
+    def _gamma_lut_for(self, gamma: float) -> np.ndarray:
+        g = max(1e-3, float(gamma))
+        if self._gamma_lut is not None and abs(g - self._gamma_lut_value) < 1e-6:
+            return self._gamma_lut
+
+        x = np.linspace(0.0, 1.0, 256, dtype=np.float32)
+        y = np.power(x, 1.0 / g)
+        lut = np.clip(y * 255.0, 0.0, 255.0).astype(np.uint8)
+        self._gamma_lut = lut
+        self._gamma_lut_value = g
+        return lut
+
+    @staticmethod
+    def _gray_world_balance(img: np.ndarray, *, order: str, max_gain: float) -> np.ndarray:
+        if img.ndim != 3 or img.shape[2] < 3:
+            return img
+
+        out = img.astype(np.float32)
+
+        if order == "bgr":
+            b = out[:, :, 0]
+            g = out[:, :, 1]
+            r = out[:, :, 2]
+        else:
+            r = out[:, :, 0]
+            g = out[:, :, 1]
+            b = out[:, :, 2]
+
+        mr = float(np.mean(r))
+        mg = float(np.mean(g))
+        mb = float(np.mean(b))
+        m = (mr + mg + mb) / 3.0
+
+        def gain(ch_mean: float) -> float:
+            if ch_mean <= 1e-6:
+                return 1.0
+            return float(np.clip(m / ch_mean, 0.6, max(1.0, max_gain)))
+
+        gr = gain(mr)
+        gg = gain(mg)
+        gb = gain(mb)
+
+        if order == "bgr":
+            out[:, :, 0] *= gb
+            out[:, :, 1] *= gg
+            out[:, :, 2] *= gr
+        else:
+            out[:, :, 0] *= gr
+            out[:, :, 1] *= gg
+            out[:, :, 2] *= gb
+
+        return np.clip(out, 0.0, 255.0).astype(np.uint8)
 
     def _extract(self, gray: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         pts = cv2.goodFeaturesToTrack(

@@ -26,6 +26,15 @@ class CameraConfig:
     # Wait for first frame
     startup_wait_seconds: float = 2.5
 
+    # Color-order handling:
+    # Vilib often provides RGB; if your stream appears blue-tinted, set source_color_order="bgr".
+    source_color_order: ColorOrder = "rgb"
+    output_color_order: ColorOrder = "rgb"
+
+    # Optional diagnostics
+    debug_color_stats: bool = False
+    debug_color_stats_period_s: float = 2.0
+
 
 class PiCarXCamera:
     """
@@ -35,6 +44,8 @@ class PiCarXCamera:
     def __init__(self, cfg: Optional[CameraConfig] = None):
         self.cfg = cfg or CameraConfig()
         self._started = False
+        self.color_order: ColorOrder = self.cfg.output_color_order
+        self._last_color_print_t: float = 0.0
 
     def start(self) -> None:
         if self._started:
@@ -99,5 +110,26 @@ class PiCarXCamera:
         if img.dtype != np.uint8:
             img = np.clip(img, 0, 255).astype(np.uint8)
         frame = np.ascontiguousarray(img)
+
+        if self.cfg.source_color_order != self.cfg.output_color_order:
+            if self.cfg.source_color_order == "rgb" and self.cfg.output_color_order == "bgr":
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            elif self.cfg.source_color_order == "bgr" and self.cfg.output_color_order == "rgb":
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        if self.cfg.debug_color_stats and frame.ndim == 3 and frame.shape[2] >= 3:
+            now = time.time()
+            if now - self._last_color_print_t >= max(0.2, self.cfg.debug_color_stats_period_s):
+                self._last_color_print_t = now
+                if self.cfg.output_color_order == "rgb":
+                    r = float(frame[:, :, 0].mean())
+                    g = float(frame[:, :, 1].mean())
+                    b = float(frame[:, :, 2].mean())
+                else:
+                    b = float(frame[:, :, 0].mean())
+                    g = float(frame[:, :, 1].mean())
+                    r = float(frame[:, :, 2].mean())
+                blue_ratio = b / max(1.0, 0.5 * (r + g))
+                print(f"[camera] mean_rgb=({r:.1f},{g:.1f},{b:.1f}) blue_ratio={blue_ratio:.2f}")
 
         return frame

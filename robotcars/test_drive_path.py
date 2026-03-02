@@ -193,15 +193,15 @@ def drive_to_goal_with_sparse_replan(
 
         return False
 
-    def slam_quality() -> Tuple[float, bool, bool, int]:
+    def slam_quality() -> Tuple[float, bool, bool, int, float, float]:
         """
         Returns:
-          confidence, high_confidence, blurry, inlier_count
+          confidence, high_confidence, blurry, inlier_count, contrast, blue_ratio
         """
         try:
             status = slam.get_status()
         except Exception:
-            return 1.0, True, False, 0
+            return 1.0, True, False, 0, 0.0, 1.0
 
         conf = float(getattr(status, "confidence", 0.0))
         high_conf = bool(
@@ -210,7 +210,9 @@ def drive_to_goal_with_sparse_replan(
         )
         blurry = bool(getattr(status, "blurry", False))
         inliers = int(getattr(status, "inlier_count", 0))
-        return conf, high_conf, blurry, inliers
+        contrast = float(getattr(status, "contrast", 0.0))
+        blue_ratio = float(getattr(status, "blue_ratio", 1.0))
+        return conf, high_conf, blurry, inliers, contrast, blue_ratio
 
     try:
         while (time.time() - t0) < timeout_s:
@@ -249,7 +251,7 @@ def drive_to_goal_with_sparse_replan(
                 motor.mark_reached()
                 return True
 
-            pose_conf, pose_high_conf, pose_blurry, pose_inliers = slam_quality()
+            pose_conf, pose_high_conf, pose_blurry, pose_inliers, pose_contrast, pose_blue_ratio = slam_quality()
             now = time.time()
             since_plan = (now - last_plan_t) if last_plan_t > 0 else 0.0
             hold_for_pose_recovery = (
@@ -268,6 +270,7 @@ def drive_to_goal_with_sparse_replan(
                         f"pose_g=({pose_grid.x:.1f},{pose_grid.y:.1f},{pose_grid.theta:.2f}) "
                         f"goal=({goal_gx},{goal_gy}) d={d_goal:.1f} "
                         f"pose_conf={pose_conf:.2f} inliers={pose_inliers} blurry={pose_blurry} "
+                        f"ctr={pose_contrast:.1f} blue={pose_blue_ratio:.2f} "
                         f"hold=pose_recovery replan_in={(replan_cfg.replan_period_s - since_plan):.1f}s"
                     )
                 continue
@@ -344,6 +347,7 @@ def drive_to_goal_with_sparse_replan(
                     f"goal=({goal_gx},{goal_gy}) d={d_goal:.1f} "
                     f"ultra={None if dist_cm is None else round(dist_cm,1)}cm "
                     f"pose_conf={pose_conf:.2f} inliers={pose_inliers} blurry={pose_blurry} "
+                    f"ctr={pose_contrast:.1f} blue={pose_blue_ratio:.2f} "
                     f"replan_in={(replan_cfg.replan_period_s - (now - last_plan_t)):.1f}s"
                 )
 
@@ -365,8 +369,10 @@ def main() -> None:
         display_local=False,
         display_web=False,
         frame_size=(640, 480),
+        source_color_order="rgb",
         output_color_order="rgb",
         frame_rate=30,
+        debug_color_stats=True,
     ))
     cam.start()
 
@@ -381,6 +387,10 @@ def main() -> None:
             translation_step=0.2,     # still overridden per tick
             forward_sign=-1.0,        # IMPORTANT: you observed x decreasing
             pose_ema_alpha=0.25,      # reduces jerk a lot
+            gray_use_clahe=True,
+            gray_clahe_clip_limit=2.5,
+            gray_clahe_tile_size=8,
+            auto_white_balance=True,
         )
     )
 
