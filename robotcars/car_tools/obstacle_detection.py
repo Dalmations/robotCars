@@ -51,9 +51,14 @@ class VslamConfig:
     max_depth: float = 200.0
 
     # Debug drawing
-    debug_draw_keypoints: bool = False
-    debug_draw_matches: bool = False
+    debug_draw_keypoints: bool = True
+    debug_draw_matches: bool = True
     debug_max_match_draw: int = 80
+    # If forward motion makes pose.x decrease, set forward_sign = -1.0
+    forward_sign: float = 1.0
+
+    # Pose smoothing (EMA). 0 disables smoothing, 0.1-0.3 typical.
+    pose_ema_alpha: float = 0.2
 
 
 class _Frame:
@@ -120,6 +125,7 @@ class MonocularVSLAM:
         self.bf = cv2.BFMatcher(cv2.NORM_HAMMING)
 
         self._last: Optional[_Frame] = None
+        self._pose_filt: Optional[Pose] = None
 
         # Maintain Tcw (world->camera). Start at identity.
         self._Tcw = np.eye(4, dtype=np.float64)
@@ -228,29 +234,51 @@ class MonocularVSLAM:
 
     def _publish_pose(self) -> None:
         """
-        +X right, +Y down, +Z forward  (OpenCV convention)
+        We maintain Tcw = world->camera where the initial camera frame follows OpenCV convention:
+        +X right, +Y down, +Z forward.
 
-        For a ground robot we publish a planar navigation pose:
-        x = forward  (world Z)
-        y = left     (-world X)
-        theta = heading from camera forward axis projected onto the XZ plane (left-positive)
+        Publish a planar nav pose:
+        x = forward  (± world Z)
+        y = left     (∓ world X)
+        theta from camera forward axis projected into XZ plane.
+
+        Also apply optional EMA smoothing to reduce jerk.
         """
         Twc = self._invert_se3(self._Tcw)
         p = Twc[:3, 3]
         Rwc = Twc[:3, :3]
 
-        # Planar position (forward/left)
-        x = float(p[2])        # forward
-        y = float(-p[0])       # left
+        s = float(self.cfg.forward_sign)
 
-        # Heading: use camera forward axis in world, projected to XZ plane
-        fwd = Rwc[:, 2]        # camera +Z axis expressed in world coords
-        if abs(fwd[0]) + abs(fwd[2]) > 1e-9:
-            theta = float(math.atan2(-fwd[0], fwd[2]))  # left-positive
+        # Planar position (forward/left). Flip signs together to keep frame right-handed.
+        x_raw = float(s * p[2])         # forward
+        y_raw = float(s * (-p[0]))      # left
+
+        # Heading: camera forward axis in world
+        fwd = Rwc[:, 2]
+        # Use same sign flip so "forward" direction stays consistent
+        theta_raw = float(math.atan2(-s * fwd[0], s * fwd[2])) if (abs(fwd[0]) + abs(fwd[2]) > 1e-9) else 0.0
+
+        pose_raw = Pose(x=x_raw, y=y_raw, theta=theta_raw)
+
+        a = float(self.cfg.pose_ema_alpha)
+        if a <= 0.0 or self._pose_filt is None:
+            self._pose_filt = pose_raw
         else:
-            theta = 0.0
+            # EMA on x,y and circular EMA on theta
+            xf = (1.0 - a) * self._pose_filt.x + a * pose_raw.x
+            yf = (1.0 - a) * self._pose_filt.y + a * pose_raw.y
 
-        self.shared_map.set_pose(self.car_id, Pose(x=x, y=y, theta=theta))
+            # circular blend
+            c0, s0 = math.cos(self._pose_filt.theta), math.sin(self._pose_filt.theta)
+            c1, s1 = math.cos(pose_raw.theta), math.sin(pose_raw.theta)
+            cf = (1.0 - a) * c0 + a * c1
+            sf = (1.0 - a) * s0 + a * s1
+            thf = math.atan2(sf, cf)
+
+            self._pose_filt = Pose(x=float(xf), y=float(yf), theta=float(thf))
+
+        self.shared_map.set_pose(self.car_id, self._pose_filt)
 
     @staticmethod
     def _invert_se3(T: np.ndarray) -> np.ndarray:

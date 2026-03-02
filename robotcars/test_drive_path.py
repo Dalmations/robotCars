@@ -9,9 +9,9 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 
-from camera_input import PiCarXCamera, CameraConfig
+from car_tools.camera_input import PiCarXCamera, CameraConfig
 from coordination.shared_map import SharedMap
-from movement import MovementPlanner, PlanningConfig
+from car_tools.movement import MovementPlanner, PlanningConfig
 from car_tools.motor_controller import MotorController, MotorConfig
 from car_tools.picarx_path_follower import PathFollower, FollowerConfig
 from car_tools.obstacle_detection import MonocularVSLAM, CameraIntrinsics, VslamConfig
@@ -101,6 +101,10 @@ def drive_to_goal_with_sparse_replan(
 
     # Keep one "virtual obstacle" entry updated
     ULTRA_OB_ID = "ultra_front"
+    steer_filt = 0.0
+    steer_alpha = 0.25      # 0.2–0.35 good
+    steer_deadband = 2.0    # degrees; ignore tiny noise
+    steer_rate_limit = 12.0 # deg per control tick max change
 
     current_path: Optional[Path] = None
     last_plan_t: float = 0.0
@@ -264,7 +268,23 @@ def drive_to_goal_with_sparse_replan(
             min_spd = max(15, int(0.55 * base))
             spd = int(base - (base - min_spd) * min(1.0, steer_abs / max(1e-6, maxs)))
 
-            motor.set_steering(steer_deg)
+            steer_cmd = steer_deg
+
+            # deadband (ignore tiny noise)
+            if abs(steer_cmd) < steer_deadband:
+                steer_cmd = 0.0
+
+            # EMA smoothing on steering command
+            steer_filt = (1.0 - steer_alpha) * steer_filt + steer_alpha * steer_cmd
+
+            # rate limit (per tick)
+            dmax = float(steer_rate_limit)
+            steer_filt = max(steer_cmd - dmax, min(steer_cmd + dmax, steer_filt))
+
+            # Use a constant speed while tuning (speed modulation causes jerk)
+            spd = int(motor.cfg.speed)
+
+            motor.set_steering(steer_filt)
             motor.forward_for(follower.cfg.dt, speed=spd)
 
             now = time.time()
@@ -306,15 +326,46 @@ def main() -> None:
     # SLAM
     intr = CameraIntrinsics(fx=520.0, fy=520.0, cx=320.0, cy=240.0)
     slam = MonocularVSLAM(
-        intr,
-        shared_map,
-        car_id=0,
+        intr, shared_map, car_id=0,
         cfg=VslamConfig(
             input_color_order=cam.color_order,
             debug_draw_keypoints=False,
             debug_draw_matches=False,
-            translation_step=0.2,  # overridden each tick
+            translation_step=0.2,     # still overridden per tick
+            forward_sign=-1.0,        # IMPORTANT: you observed x decreasing
+            pose_ema_alpha=0.25,      # reduces jerk a lot
         )
+    )
+
+    motor = MotorController(MotorConfig(
+        speed=26,                   # slower but steady
+        step_seconds=0.40,           # tune later; higher makes VO step smaller per tick
+        brake_between_steps=False,   # continuous motion
+        steering_slew_deg_per_s=90.0,# slower servo motion = less jerk
+        steer_sign=1.0,
+        steer_offset_deg=0.0,
+        max_steer_deg=35.0,
+        settle_seconds=0.01,
+    ))
+
+    follower = PathFollower(motor, FollowerConfig(
+        dt=0.12,
+        lookahead=14.0,
+        wheelbase=2.2,
+        goal_tolerance=3.0,
+        pose_frame="grid",
+        steer_sign=1.0,
+        max_steer_deg=motor.cfg.max_steer_deg,
+    ))
+
+    replan_cfg = ReplanConfig(
+        replan_period_s=3.0,
+        replan_min_interval_s=0.9,
+        ultra_replan_cm=40.0,
+        ultra_emergency_cm=20.0,
+        cm_per_grid=12.0,
+        obstacle_radius_cells=2.0,
+        emergency_backup_s=0.20,
     )
 
     # Planner (inflate obstacles; simplify path)
@@ -324,36 +375,6 @@ def main() -> None:
         simplify_path=True,
         nudge_start_goal=True,
     ), world_size=(50, 50))
-
-    # Motor (smooth motion: don't brake between dt steps)
-    motor = MotorController(MotorConfig(
-        speed=30,
-        step_seconds=0.35,            # tune
-        brake_between_steps=False,    # smoother than stop-start
-        steering_slew_deg_per_s=140.0,
-        steer_sign=1.0,
-        steer_offset_deg=0.0,
-        max_steer_deg=35.0,
-        settle_seconds=0.02,
-    ))
-
-    follower = PathFollower(motor, FollowerConfig(
-        dt=0.10,          # less CPU and less twitch; also 10Hz ultrasonic is fine :contentReference[oaicite:5]{index=5}
-        lookahead=12.0,
-        wheelbase=2.5,
-        goal_tolerance=3.0,
-        pose_frame="grid",
-        steer_sign=1.0,
-        max_steer_deg=motor.cfg.max_steer_deg,
-    ))
-
-    replan_cfg = ReplanConfig(
-        replan_period_s=3.0,
-        ultra_replan_cm=40.0,
-        ultra_emergency_cm=20.0,
-        cm_per_grid=10.0,            # tune to your floor scale
-        obstacle_radius_cells=2.0,
-    )
 
     try:
         # Warm-up (let camera exposure settle)
@@ -379,7 +400,7 @@ def main() -> None:
             camera=cam,
             replan_cfg=replan_cfg,
             timeout_s=180.0,
-            debug_show_keypoints=False,
+            debug_show_keypoints=True,
         )
         print("Reached (45,45):", ok)
 
@@ -397,7 +418,7 @@ def main() -> None:
                 camera=cam,
                 replan_cfg=replan_cfg,
                 timeout_s=180.0,
-                debug_show_keypoints=False,
+                debug_show_keypoints=True,
             )
             print(f"Reached {goal}:", ok)
             time.sleep(0.5)
