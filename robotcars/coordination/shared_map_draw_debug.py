@@ -26,7 +26,7 @@ def rasterize_segments_to_grid(
         return max(0, min(w - 1, x)), max(0, min(h - 1, y))
 
     def stamp(x: int, y: int) -> None:
-        # draw a small square for thickness
+        # draw a small square
         for dx in range(-thickness_cells, thickness_cells + 1):
             for dy in range(-thickness_cells, thickness_cells + 1):
                 xx, yy = clamp_cell(x + dx, y + dy)

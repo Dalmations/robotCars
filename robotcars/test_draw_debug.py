@@ -6,7 +6,7 @@ from car_tools.movement import MovementPlanner
 from model import TargetPoint
 
 from car_tools.motor_controller import MotorController, MotorConfig
-from car_tools.picarx_path_follower import PathFollower, FollowerConfig
+from car_tools.picarx_path_follower import PurePursuitFollower, FollowerConfig
 
 from car_tools.draw_debug import TurtleObstacleGoalDrawer
 from coordination.shared_map_draw_debug import rasterize_segments_to_grid
@@ -32,8 +32,8 @@ def main() -> None:
 
     target = TargetPoint(x=float(round(goal[0])), y=float(round(goal[1])))
 
-    motor = MotorController(MotorConfig(speed=80, step_seconds=0.18))
-    follower = PathFollower(motor, FollowerConfig(heading_to_steer_gain=22.0))
+    motor = MotorController(MotorConfig())
+    follower = PurePursuitFollower(motor, FollowerConfig())
 
     try:
         path = planner.plan_to_target(target=target, shared_map=shared_map)
