@@ -295,7 +295,12 @@ def drive_to_goal_with_sparse_replan(
             can_replan = pose_high_conf or (current_path is None)
             if wants_replan and can_replan:
                 goal = TargetPoint(float(goal_gx), float(goal_gy))
-                current_path = planner.plan_to_target(goal, shared_map, target_frame="grid")
+                current_path = planner.repath_to_target(
+                    current_path=current_path,
+                    target=goal,
+                    shared_map=shared_map,
+                    target_frame="grid",
+                )
                 last_plan_t = time.time()
 
             if current_path is None or len(current_path.waypoints) < 2:
@@ -373,6 +378,7 @@ def main() -> None:
         output_color_order="rgb",
         frame_rate=30,
         debug_color_stats=True,
+        camera_controls={"Saturation": 0.80},
     ))
     cam.start()
 

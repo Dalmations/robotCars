@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple, Literal
+from typing import Optional, Tuple, Literal, Dict, Any
 
 import numpy as np
 import cv2
@@ -35,6 +35,12 @@ class CameraConfig:
     debug_color_stats: bool = False
     debug_color_stats_period_s: float = 2.0
 
+    # Optional pass-through controls for libcamera/Vilib.
+    # Examples:
+    #   {"AwbEnable": True, "AwbMode": 0, "Saturation": 0.8}
+    # Unsupported controls are ignored by the try/except in start().
+    camera_controls: Optional[Dict[str, Any]] = None
+
 
 class PiCarXCamera:
     """
@@ -53,9 +59,12 @@ class PiCarXCamera:
 
         Vilib.camera_start(size=self.cfg.frame_size)
 
-        # Set frame rate to reduce load
+        # Set base camera controls (and optional user overrides) to reduce load / tune color.
+        controls: Dict[str, Any] = {"FrameRate": int(self.cfg.frame_rate)}
+        if self.cfg.camera_controls:
+            controls.update(self.cfg.camera_controls)
         try:
-            Vilib.set_controls({"FrameRate": int(self.cfg.frame_rate)})
+            Vilib.set_controls(controls)
         except Exception:
             pass
 

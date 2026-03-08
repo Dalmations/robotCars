@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Literal
 
 import cv2
 import numpy as np
@@ -72,6 +72,11 @@ class VslamConfig:
     confidence_min_contrast: float = 25.0
 
     # Preprocessing for low-light / low-contrast scenes
+    # "green" is robust to RGB/BGR confusion and reduces chroma artifacts from bad AWB/lens shading.
+    gray_source: Literal["luma", "green", "y_channel"] = "green"
+    gray_flat_field_correction: bool = True
+    gray_flat_field_sigma: float = 28.0
+    gray_flat_field_strength: float = 0.85
     gray_use_clahe: bool = True
     gray_clahe_clip_limit: float = 2.2
     gray_clahe_tile_size: int = 8
@@ -488,16 +493,35 @@ class MonocularVSLAM:
             blue_ratio = float(mean_b / max(1.0, 0.5 * (mean_r + mean_g)))
             stats = {"mean_r": mean_r, "mean_g": mean_g, "mean_b": mean_b, "blue_ratio": blue_ratio}
 
-            if self.cfg.auto_white_balance:
+            gray_source = str(self.cfg.gray_source).lower()
+            # If we only use the green channel, skip RGB balancing to avoid injecting color gain artifacts.
+            if self.cfg.auto_white_balance and gray_source != "green":
                 c = self._gray_world_balance(c, order=order, max_gain=float(self.cfg.max_channel_gain))
 
-            if order == "bgr":
-                g = cv2.cvtColor(c, cv2.COLOR_BGR2GRAY)
+            if gray_source == "green":
+                # Channel index 1 is green for both RGB and BGR layouts.
+                g = c[:, :, 1]
+            elif gray_source == "y_channel":
+                if order == "bgr":
+                    ycc = cv2.cvtColor(c, cv2.COLOR_BGR2YCrCb)
+                else:
+                    ycc = cv2.cvtColor(c, cv2.COLOR_RGB2YCrCb)
+                g = ycc[:, :, 0]
             else:
-                g = cv2.cvtColor(c, cv2.COLOR_RGB2GRAY)
+                if order == "bgr":
+                    g = cv2.cvtColor(c, cv2.COLOR_BGR2GRAY)
+                else:
+                    g = cv2.cvtColor(c, cv2.COLOR_RGB2GRAY)
 
         if g.dtype != np.uint8:
             g = np.clip(g, 0, 255).astype(np.uint8)
+
+        if self.cfg.gray_flat_field_correction:
+            g = self._flat_field_correct(
+                g,
+                sigma=float(self.cfg.gray_flat_field_sigma),
+                strength=float(self.cfg.gray_flat_field_strength),
+            )
 
         gamma = float(self.cfg.gray_gamma)
         if abs(gamma - 1.0) > 1e-3:
@@ -519,6 +543,33 @@ class MonocularVSLAM:
             g = cv2.addWeighted(g, 1.0 + amount, blur, -amount, 0)
 
         return np.ascontiguousarray(g), stats
+
+    @staticmethod
+    def _flat_field_correct(gray: np.ndarray, *, sigma: float, strength: float) -> np.ndarray:
+        """
+        Remove slow illumination gradients (vignette / yellow-center-pink-edge style shading)
+        by dividing by a heavily blurred illumination estimate.
+        """
+        if gray.size == 0:
+            return gray
+
+        s = max(0.0, float(sigma))
+        k = float(np.clip(strength, 0.0, 1.0))
+        if s <= 1e-3 or k <= 1e-3:
+            return gray
+
+        g = gray.astype(np.float32)
+        illum = cv2.GaussianBlur(g, (0, 0), sigmaX=s, sigmaY=s)
+        m = float(np.mean(illum))
+        if m <= 1e-6:
+            return gray
+
+        corrected = g * (m / (illum + 1.0))
+        corrected = np.clip(corrected, 0.0, 255.0)
+        if k < 0.999:
+            corrected = (1.0 - k) * g + k * corrected
+
+        return corrected.astype(np.uint8)
 
     def _gamma_lut_for(self, gamma: float) -> np.ndarray:
         g = max(1e-3, float(gamma))

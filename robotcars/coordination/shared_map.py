@@ -264,9 +264,6 @@ class SharedMap:
     def is_path_blocked(self, path: Path) -> bool:
         return self.get_blocking_obstacle(path) is not None
 
-    def repath_around(self, proposed_path: Path) -> Path:
-        return proposed_path
-
     def nearest_unobstructed_point(self, target: TargetPoint) -> TargetPoint:
         grid = self.to_occupancy_grid()
         tx, ty = int(round(target.x)), int(round(target.y))
@@ -278,17 +275,3 @@ class SharedMap:
                     if 0 <= x < w and 0 <= y < h and grid[x, y] == 0:
                         return TargetPoint(x=float(x), y=float(y))
         return target
-
-    def plan_path_to(self, target: TargetPoint) -> Path:
-        """
-        Target is interpreted in grid coords, A* runs on a grid.
-        Plan to a world target, convert with:
-            gx,gy = shared_map.world_to_grid(world_x, world_y)
-            shared_map.plan_path_to(TargetPoint(float(gx), float(gy)))
-        """
-        from virtualworld import astar
-        start = self.get_car_grid_position()
-        grid = self.to_occupancy_grid()
-        goal = (int(round(target.x)), int(round(target.y)))
-        raw = astar(grid, start, goal) or [start]
-        return Path(waypoints=[TargetPoint(float(x), float(y)) for x, y in raw])

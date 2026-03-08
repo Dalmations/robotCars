@@ -45,6 +45,7 @@ def drive_to_grid_goal(
     t0 = time.time()
     goal = TargetPoint(x=float(goal_gx), y=float(goal_gy))
     repathCount = 0
+    current_path = None
     while (time.time() - t0) < timeout_s:
         # 1) SLAM update
         frame = camera.read()
@@ -72,16 +73,21 @@ def drive_to_grid_goal(
         # Re plan path to goal every 5s
         if repathCount * 5 > (time.time() - t0):
             repathCount += 1
-            path = planner.plan_to_target(goal, shared_map, target_frame="grid")
+            current_path = planner.repath_to_target(
+                current_path=current_path,
+                target=goal,
+                shared_map=shared_map,
+                target_frame="grid",
+            )
 
-            if path is None or len(path.waypoints) < 2:
+            if current_path is None or len(current_path.waypoints) < 2:
                 # Nothing to follow safely
                 motor.stop()
                 time.sleep(follower.cfg.dt)
                 continue
 
             # Pure pursuit steer
-            tx, ty = follower._lookahead_point(path, pose, follower.cfg.lookahead)
+            tx, ty = follower._lookahead_point(current_path, pose, follower.cfg.lookahead)
             delta_rad = follower._pure_pursuit_delta(pose, target_x=tx, target_y=ty)
             steer_deg = math.degrees(delta_rad)
             # MotorController handles sign/gain/offset/clamp
@@ -107,6 +113,7 @@ def main() -> None:
         display_web=False,
         display_local=False,
         frame_size=(640, 480),
+        camera_controls={"Saturation": 0.80},
     ))
     cam.start()
 

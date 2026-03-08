@@ -22,6 +22,10 @@ FrameName = Literal["grid", "world"]
 
 @dataclass
 class PlanningConfig:
+    # Path search strategy
+    algorithm: Literal["astar", "weighted_astar"] = "weighted_astar"
+    astar_heuristic_weight: float = 1.25
+
     # If True, project SLAM map points into grid as obstacles (usually noisy unless filtered)
     include_slam_points: bool = False
     slam_points_radius_cells: int = 0
@@ -43,7 +47,7 @@ class PlanningConfig:
 @dataclass
 class MovementPlanner:
     """
-    Uses A* over occupancy grid from SharedMap.
+    Uses A* / weighted A* over occupancy grid from SharedMap.
     Output path waypoints are in grid coordinates by default.
     """
     planning_cfg: object = field(default_factory=PlanningConfig)
@@ -92,12 +96,16 @@ class MovementPlanner:
             start = self._nudge_free(grid, start)
             goal = self._nudge_free(grid, goal)
 
-        raw_path = astar(grid, start, goal)
+        if start == goal:
+            return Path(waypoints=[TargetPoint(x=float(start[0]), y=float(start[1]))])
+
+        heuristic_weight = self._heuristic_weight(cfg)
+        raw_path = astar(grid, start, goal, heuristic_weight=heuristic_weight)
 
         if raw_path is None:
             # Fallback: empty-world plan (only if the goal is in bounds)
             empty = np.zeros((w, h), dtype=np.int32)
-            raw_path = astar(empty, start, goal) or [start]
+            raw_path = astar(empty, start, goal, heuristic_weight=heuristic_weight) or [start]
 
         # Convert to waypoints
         waypoints = [TargetPoint(x=float(x), y=float(y)) for (x, y) in raw_path]
@@ -111,6 +119,23 @@ class MovementPlanner:
             waypoints = waypoints[: cfg.max_waypoints]
 
         return Path(waypoints=waypoints)
+
+    def repath_to_target(
+        self,
+        current_path: Optional[Path],
+        target: TargetPoint,
+        shared_map: SharedMap,
+        *,
+        target_frame: FrameName = "grid",
+        force_replan: bool = False,
+    ) -> Path:
+        """
+        Replan only when needed; otherwise keep following the current path.
+        """
+        if not force_replan and current_path is not None and len(current_path.waypoints) >= 1:
+            if not self.is_obstructed(current_path, shared_map):
+                return current_path
+        return self.plan_to_target(target=target, shared_map=shared_map, target_frame=target_frame)
 
     def is_obstructed(self, path: Path, shared_map: SharedMap) -> bool:
         cfg = self._cfg()
@@ -138,6 +163,12 @@ class MovementPlanner:
             return pc
 
         out = PlanningConfig()
+        algo = str(getattr(pc, "algorithm", out.algorithm)).strip().lower()
+        if algo in {"astar", "weighted_astar"}:
+            out.algorithm = algo  # type: ignore[assignment]
+        out.astar_heuristic_weight = float(getattr(pc, "astar_heuristic_weight", out.astar_heuristic_weight))
+        if out.astar_heuristic_weight < 1.0:
+            out.astar_heuristic_weight = 1.0
         out.include_slam_points = bool(getattr(pc, "include_slam_points", out.include_slam_points))
         out.slam_points_radius_cells = int(getattr(pc, "slam_points_radius_cells", out.slam_points_radius_cells))
         out.slam_points_max = int(getattr(pc, "slam_points_max", out.slam_points_max))
@@ -146,6 +177,12 @@ class MovementPlanner:
         out.simplify_path = bool(getattr(pc, "simplify_path", out.simplify_path))
         out.max_waypoints = int(getattr(pc, "max_waypoints", out.max_waypoints))
         return out
+
+    @staticmethod
+    def _heuristic_weight(cfg: PlanningConfig) -> float:
+        if cfg.algorithm == "astar":
+            return 1.0
+        return max(1.0, float(cfg.astar_heuristic_weight))
 
     @staticmethod
     def _clamp_point(p: GridPoint, w: int, h: int) -> GridPoint:
