@@ -10,7 +10,7 @@ import numpy as np
 
 from model import Pose
 from coordination.shared_map import SharedMap
-
+import time
 
 @dataclass
 class CameraIntrinsics:
@@ -213,6 +213,7 @@ class MonocularVSLAM:
 
     # Main Tick()
     def tick(self, frame_bgr_or_rgb: np.ndarray, translation_step: Optional[float] = None) -> Optional[Pose]:
+        start_SLAM = time.time()
         gray, frame_stats = self._to_gray(frame_bgr_or_rgb)
         pts_xy, des = self._extract(gray)
         sharpness = self._frame_sharpness(gray)
@@ -340,6 +341,8 @@ class MonocularVSLAM:
         )
         self._last = cur
         self._publish_pose()
+        end_SLAM = time.time()
+        print(f"time to slam tick = {start_SLAM - end_SLAM}")
         return self.shared_map.poses.get(self.car_id)
 
     # ---------------- Internals ----------------
