@@ -24,42 +24,23 @@ def read_ultrasonic_cm(motor: MotorController) -> Optional[float]:
     """
     Returns distance in cm, or None if invalid/unavailable.
 
-    PiCar-X examples use px.ultrasonic.read(). :contentReference[oaicite:2]{index=2}
-    DeepWiki notes px.get_distance() is a wrapper around ultrasonic.read() and returns cm. :contentReference[oaicite:3]{index=3}
+    PiCar-X examples use px.ultrasonic.read().
+    DeepWiki notes px.get_distance() is a wrapper around ultrasonic.read() and returns cm
     """
     px = getattr(motor, "px", None)
     if px is None:
         return None
-
-    # Prefer get_distance() if present
-    if hasattr(px, "get_distance"):
-        try:
-            d = float(px.get_distance())
-            if not np.isfinite(d) or d <= 0 or d > 500:
-                return None
-            return d
-        except Exception:
-            pass
-
-    # Fallback: ultrasonic.read()
-    try:
-        u = getattr(px, "ultrasonic", None)
-        if u is not None and hasattr(u, "read"):
-            d = float(u.read())
-            if not np.isfinite(d) or d <= 0 or d > 500:
-                return None
-            return d
-    except Exception:
-        pass
-
-    return None
+    d = float(px.get_distance())
+    if not np.isfinite(d) or d <= 0 or d > 500:
+        return None
+    return d
 
 
 @dataclass
 class ReplanConfig:
     # replan cadence
     replan_period_s: float = 3.0
-    replan_min_interval_s: float = 0.7  # avoid thrashing on noisy readings
+    replan_min_interval_s: float = 1 # replan once a second if close
 
     # ultrasonic thresholds (cm)
     # SunFounder obstacle avoidance lesson uses SafeDistance=40, DangerDistance=20
@@ -77,7 +58,7 @@ class ReplanConfig:
     ultra_clear_cm: float = 60.0
 
     # if emergency, back up a bit
-    emergency_backup_s: float = 0.25
+    emergency_backup_s: float = 1
     emergency_wait_high_conf_timeout_s: float = 3.0
     emergency_wait_tick_s: float = 0.05
 
