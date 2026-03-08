@@ -324,6 +324,7 @@ def drive_to_goal_with_sparse_replan(
 
                 if got_high_conf:
                     goal = TargetPoint(float(goal_gx), float(goal_gy))
+                    start_plan_t = time.time()
                     current_path = planner.repath_to_target(
                         current_path=current_path,
                         target=goal,
@@ -332,6 +333,7 @@ def drive_to_goal_with_sparse_replan(
                         force_replan=True,
                     )
                     last_plan_t = time.time()
+                    print(f"time to plan = {start_plan_t-last_plan_t}")
                     emergency_replan_required = False
 
                 # Always skip motion this loop after an emergency event.
