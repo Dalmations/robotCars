@@ -67,18 +67,19 @@ class ReplanConfig:
     ultra_emergency_cm: float = 20.0    # "too close" => stop/back up + replan
 
     # map injection: cm-to-grid scaling
-    cm_per_grid: float = 10.0           # TUNE: how many cm is 1 grid cell
-    obstacle_radius_cells: float = 2.0
+    cm_per_grid: float = 50.0
 
-    # how far ahead to drop the virtual obstacle (min/max in grid cells)
-    ahead_cells_min: float = 2.0
-    ahead_cells_max: float = 6.0
+    # how far ahead to drop the virtual obstacle (cm from ultrasonic sensor)
+    ahead_cm_min: float = 5.0
+    ahead_cm_max: float = 120.0
 
     # if no obstacle for a while, clear the virtual obstacle
     ultra_clear_cm: float = 60.0
 
     # if emergency, back up a bit
     emergency_backup_s: float = 0.25
+    emergency_wait_high_conf_timeout_s: float = 3.0
+    emergency_wait_tick_s: float = 0.05
 
     # pose-confidence gating
     min_pose_conf_for_replan: float = 0.55
@@ -112,6 +113,7 @@ def drive_to_goal_with_sparse_replan(
     steer_rate_limit = 12.0 # deg per control tick max change
 
     current_path: Optional[Path] = None
+    emergency_replan_required = False
     last_plan_t: float = 0.0
     last_ultra_t: float = 0.0
 
@@ -143,14 +145,18 @@ def drive_to_goal_with_sparse_replan(
         if dist_cm <= replan_cfg.ultra_replan_cm:
             last_ultra_t = time.time()
 
-            # Convert distance->cells (clamped)
-            d_cells = dist_cm / max(1e-6, replan_cfg.cm_per_grid)
-            d_cells = float(np.clip(d_cells, replan_cfg.ahead_cells_min, replan_cfg.ahead_cells_max))
+            # Convert distance->cells (clamped in cm first, then converted).
+            d_cm = float(np.clip(dist_cm, replan_cfg.ahead_cm_min, replan_cfg.ahead_cm_max))
+            d_cells = d_cm / max(1e-6, replan_cfg.cm_per_grid)
 
             # Place obstacle "ahead" along heading in WORLD(nav) frame
             ox = float(pose_world.x + d_cells * math.cos(pose_world.theta))
             oy = float(pose_world.y + d_cells * math.sin(pose_world.theta))
-            r_world = float(replan_cfg.obstacle_radius_cells) * float(shared_map.grid.resolution)
+
+            # Fixed car footprint (not exposed as config): 20cm long x 14cm wide.
+            # Use half-diagonal as a conservative collision radius.
+            footprint_radius_cm = math.hypot(10.0, 7.0)
+            r_world = (footprint_radius_cm / max(1e-6, replan_cfg.cm_per_grid)) * float(shared_map.grid.resolution)
 
             # Store as a simple duck-typed object with x,y,radius,obstacle_id
             class _TmpObstacle:
@@ -213,6 +219,37 @@ def drive_to_goal_with_sparse_replan(
         contrast = float(getattr(status, "contrast", 0.0))
         blue_ratio = float(getattr(status, "blue_ratio", 1.0))
         return conf, high_conf, blurry, inliers, contrast, blue_ratio
+
+    def wait_for_high_conf_slam(timeout_s: float) -> bool:
+        """
+        Hold position, keep SLAM updating, and wait until status becomes high-confidence.
+        """
+        deadline = time.time() + max(0.0, float(timeout_s))
+        while time.time() < deadline:
+            fr = camera.read()
+            if fr is None:
+                time.sleep(max(0.01, replan_cfg.emergency_wait_tick_s))
+                continue
+
+            try:
+                slam.tick(fr, translation_step=0.0)
+            except TypeError:
+                slam.cfg.translation_step = 0.0
+                slam.tick(fr)
+
+            if debug_show_keypoints:
+                dbg = slam.get_debug_keypoints_frame()
+                if dbg is not None:
+                    cv2.imshow("SLAM keypoints", dbg)
+                    cv2.waitKey(1)
+
+            _conf, high_conf, _blurry, _inliers, _contrast, _blue_ratio = slam_quality()
+            if high_conf:
+                return True
+
+            time.sleep(max(0.01, replan_cfg.emergency_wait_tick_s))
+
+        return False
 
     try:
         while (time.time() - t0) < timeout_s:
@@ -280,6 +317,7 @@ def drive_to_goal_with_sparse_replan(
 
             # Emergency behavior
             if dist_cm is not None and dist_cm <= replan_cfg.ultra_emergency_cm:
+                emergency_replan_required = True
                 motor.stop()
                 # back up a touch to create space
                 if replan_cfg.emergency_backup_s > 0:
@@ -287,6 +325,36 @@ def drive_to_goal_with_sparse_replan(
                         motor.backward_for(replan_cfg.emergency_backup_s, speed=max(15, motor.cfg.speed // 2))
                     except Exception:
                         pass
+
+                motor.stop()
+
+                # Use fresh ultrasonic + pose after backing up.
+                dist_after_backup = read_ultrasonic_cm(motor)
+                if dist_after_backup is None:
+                    dist_after_backup = dist_cm
+
+                # Wait for high-confidence SLAM before we commit to a new path.
+                got_high_conf = wait_for_high_conf_slam(replan_cfg.emergency_wait_high_conf_timeout_s)
+                pose_world_after = shared_map.get_pose(car_id, frame="world")
+                if pose_world_after is not None:
+                    _ = maybe_update_ultra_obstacle(pose_world_after, dist_after_backup)
+                else:
+                    _ = maybe_update_ultra_obstacle(pose_world, dist_after_backup)
+
+                if got_high_conf:
+                    goal = TargetPoint(float(goal_gx), float(goal_gy))
+                    current_path = planner.repath_to_target(
+                        current_path=current_path,
+                        target=goal,
+                        shared_map=shared_map,
+                        target_frame="grid",
+                        force_replan=True,
+                    )
+                    last_plan_t = time.time()
+                    emergency_replan_required = False
+
+                # Always skip motion this loop after an emergency event.
+                continue
 
             obstacle_present = maybe_update_ultra_obstacle(pose_world, dist_cm)
 
@@ -302,6 +370,23 @@ def drive_to_goal_with_sparse_replan(
                     target_frame="grid",
                 )
                 last_plan_t = time.time()
+
+            if emergency_replan_required:
+                motor.stop()
+                if pose_high_conf:
+                    goal = TargetPoint(float(goal_gx), float(goal_gy))
+                    current_path = planner.repath_to_target(
+                        current_path=current_path,
+                        target=goal,
+                        shared_map=shared_map,
+                        target_frame="grid",
+                        force_replan=True,
+                    )
+                    last_plan_t = time.time()
+                    emergency_replan_required = False
+                else:
+                    time.sleep(max(0.01, replan_cfg.emergency_wait_tick_s))
+                    continue
 
             if current_path is None or len(current_path.waypoints) < 2:
                 motor.stop()
@@ -426,15 +511,14 @@ def main() -> None:
         replan_min_interval_s=0.9,
         ultra_replan_cm=40.0,
         ultra_emergency_cm=20.0,
-        cm_per_grid=12.0,
-        obstacle_radius_cells=2.0,
+        cm_per_grid=50.0,
         emergency_backup_s=0.20,
     )
 
     # Planner (inflate obstacles; simplify path)
     planner = MovementPlanner(planning_cfg=PlanningConfig(
         include_slam_points=False,
-        inflation_radius_cells=2,
+        inflation_radius_cells=0,
         simplify_path=True,
         nudge_start_goal=True,
     ), world_size=(50, 50))

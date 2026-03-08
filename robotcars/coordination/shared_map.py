@@ -228,9 +228,10 @@ class SharedMap:
         # Obstacles stored in world frame
         for ob in self.obstacles.values():
             gx, gy = self.world_to_grid(ob.x, ob.y)
-            r = max(1, int(round(ob.radius)))
-            x0, x1 = max(0, gx - r), min(w, gx + r + 1)
-            y0, y1 = max(0, gy - r), min(h, gy + r + 1)
+            r_cells = int(round(float(ob.radius) / max(1e-6, float(self.grid.resolution))))
+            r_cells = max(0, r_cells)
+            x0, x1 = max(0, gx - r_cells), min(w, gx + r_cells + 1)
+            y0, y1 = max(0, gy - r_cells), min(h, gy + r_cells + 1)
             grid[x0:x1, y0:y1] = 1
 
         if include_slam_points and self.map_points:

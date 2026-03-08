@@ -137,7 +137,7 @@ def main() -> None:
     # --- Planner ---
     planning_cfg = PlanningConfig(
         include_slam_points=False,
-        inflation_radius_cells=2,      # recommended start for real robot
+        inflation_radius_cells=0,      # with 50cm cells, extra inflation is overly conservative
         simplify_path=True,
         nudge_start_goal=True,
     )
