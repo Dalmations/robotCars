@@ -32,8 +32,6 @@ class LoopConfig:
     min_pose_conf_for_replan: float = 0.55
     blurry_hold_pause_s: float = 0.20
 
-    log_period_s: float = 1.0
-
 
 def _estimate_translation_step_cells(follower: PathFollower, motor: MotorController) -> float:
     return float(follower.cfg.dt) / float(max(1e-6, motor.cfg.step_seconds))
@@ -120,7 +118,6 @@ def drive_to_goal(
     ultra_countdown = ultrasonic_to_countdown(None)
 
     last_ultra_tick_t = 0.0
-    last_log_t = 0.0
     t0 = time.time()
 
     follower.reset()
@@ -151,8 +148,7 @@ def drive_to_goal(
                 _show_slam_debug_frame(slam)
 
             pose_grid = shared_map.get_pose(car_id, frame="grid")
-            pose_world = shared_map.get_pose(car_id, frame="world")
-            if pose_grid is None or pose_world is None:
+            if pose_grid is None:
                 motor.stop()
                 time.sleep(follower.cfg.dt)
                 continue
@@ -166,24 +162,22 @@ def drive_to_goal(
             pose_conf, pose_high_conf, pose_blurry, pose_inliers, pose_contrast = slam.slam_quality(
                 min_confidence=loop_cfg.min_pose_conf_for_replan
             )
+            _log_drive_status(
+                pose_grid=pose_grid,
+                goal_xy_grid=goal_xy_grid,
+                d_goal=d_goal,
+                dist_cm=latest_ultra_cm,
+                ultra_countdown=ultra_countdown,
+                pose_conf=pose_conf,
+                pose_inliers=pose_inliers,
+                pose_blurry=pose_blurry,
+                pose_contrast=pose_contrast,
+                prefix="hold=pose_recovery ",
+                )
 
             if current_path is not None and pose_blurry and not pose_high_conf:
                 motor.stop()
                 time.sleep(max(0.01, loop_cfg.blurry_hold_pause_s))
-                if (now - last_log_t) >= loop_cfg.log_period_s:
-                    last_log_t = now
-                    _log_drive_status(
-                        pose_grid=pose_grid,
-                        goal_xy_grid=goal_xy_grid,
-                        d_goal=d_goal,
-                        dist_cm=latest_ultra_cm,
-                        ultra_countdown=ultra_countdown,
-                        pose_conf=pose_conf,
-                        pose_inliers=pose_inliers,
-                        pose_blurry=pose_blurry,
-                        pose_contrast=pose_contrast,
-                        prefix="hold=pose_recovery ",
-                    )
                 continue
 
             needs_path = current_path is None or ultra_countdown <= 0
@@ -210,21 +204,6 @@ def drive_to_goal(
             motor.set_steering(steer_deg)
             motor.forward_for(follower.cfg.dt, speed=int(motor.cfg.speed))
 
-            now = time.time()
-            if (now - last_log_t) >= loop_cfg.log_period_s:
-                last_log_t = now
-                _log_drive_status(
-                    pose_grid=pose_grid,
-                    goal_xy_grid=goal_xy_grid,
-                    d_goal=d_goal,
-                    dist_cm=latest_ultra_cm,
-                    ultra_countdown=ultra_countdown,
-                    pose_conf=pose_conf,
-                    pose_inliers=pose_inliers,
-                    pose_blurry=pose_blurry,
-                    pose_contrast=pose_contrast,
-                )
-
     finally:
         motor.stop()
 
@@ -239,8 +218,6 @@ def main() -> None:
         display_local=False,
         display_web=False,
         frame_size=(640, 480),
-        source_color_order="rgb",
-        output_color_order="rgb",
         frame_rate=30,
         debug_color_stats=True,
         camera_controls={"Saturation": 0.80},

@@ -57,8 +57,6 @@ class SharedMap:
         pose = self.poses.get(car_id)
         if pose is None:
             return None
-        if frame == "world":
-            return pose
         gx, gy = self.world_to_grid_f(pose.x, pose.y)
         return Pose(x=float(gx), y=float(gy), theta=float(pose.theta))
 
