@@ -290,22 +290,7 @@ def main() -> None:
                 slam.tick(frame, translation_step=0.0)
             time.sleep(0.02)
 
-        print("Drive (2,2) -> (45,45)...")
-        ok = drive_to_goal(
-            (45, 45),
-            shared_map=shared_map,
-            planner=planner,
-            follower=follower,
-            motor=motor,
-            slam=slam,
-            camera=cam,
-            loop_cfg=loop_cfg,
-            timeout_s=180.0,
-            debug_show_keypoints=True,
-        )
-        print("Reached (45,45):", ok)
-
-        square = [(45, 45), (5, 45), (5, 5), (45, 5), (45, 45)]
+        square = [(20, 20), (5, 20), (5, 5), (20, 5), (20, 20)]
         print("Drive square:", square)
         for goal in square[1:]:
             ok = drive_to_goal(
