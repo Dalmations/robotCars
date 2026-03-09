@@ -57,6 +57,8 @@ class SharedMap:
         pose = self.poses.get(car_id)
         if pose is None:
             return None
+        if frame == "world":
+            return pose
         gx, gy = self.world_to_grid_f(pose.x, pose.y)
         return Pose(x=float(gx), y=float(gy), theta=float(pose.theta))
 
@@ -89,10 +91,7 @@ class SharedMap:
             self.add_map_points(new_map_points, max_points=max_points)
             return
 
-        try:
-            self._append_map_points_from_iterable(new_map_points, max_points=max_points)
-        except Exception:
-            return
+        self._append_map_points_from_iterable(new_map_points, max_points=max_points)
 
     def _append_map_points_from_iterable(self, pts: object, *, max_points: int) -> None:
         for point in pts:  # type: ignore[assignment]
@@ -102,7 +101,7 @@ class SharedMap:
         if max_points > 0 and len(self.map_points) > max_points:
             self.map_points = self.map_points[-max_points:]
 
-    def reset_for_scenario(self, _scenario: Scenario) -> None:
+    def reset(self) -> None:
         self.obstacles.clear()
         self.poses.clear()
         self.map_points.clear()
@@ -218,15 +217,6 @@ class SharedMap:
 
         return grid
 
-    def get_blocking_obstacle(self, proposed_path: Path) -> Optional[Obstacle]:
-        for waypoint in proposed_path.waypoints:
-            gx = int(round(waypoint.x))
-            gy = int(round(waypoint.y))
-            obstacle = self._explicit_obstacle_at_grid_cell(gx, gy)
-            if obstacle is not None:
-                return obstacle
-        return None
-
     def _explicit_obstacle_at_grid_cell(self, gx: int, gy: int) -> Optional[Obstacle]:
         for obstacle in self.obstacles.values():
             ox, oy = self.world_to_grid(obstacle.x, obstacle.y)
@@ -273,12 +263,13 @@ class SharedMap:
             radius=float(r_world),
             is_moving=False,
         )
-        return True
+        return
 
     def nearest_unobstructed_point(self, target: TargetPoint) -> TargetPoint:
         grid = self.to_occupancy_grid()
         tx, ty = int(round(target.x)), int(round(target.y))
         w, h = grid.shape
+
         for radius in range(1, 10):
             for dx in range(-radius, radius + 1):
                 for dy in range(-radius, radius + 1):

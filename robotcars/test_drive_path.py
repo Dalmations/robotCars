@@ -26,7 +26,6 @@ class LoopConfig:
     cm_per_grid: float = 50.0
     ahead_cm_min: float = 5.0
     ahead_cm_max: float = 120.0
-    ultra_clear_cm: float = 60.0
     ultra_timer_period_s: float = 0.1
 
     min_pose_conf_for_replan: float = 0.55
@@ -57,7 +56,6 @@ def _tick_ultrasonic(
             cm_per_grid=loop_cfg.cm_per_grid,
             ahead_cm_min=loop_cfg.ahead_cm_min,
             ahead_cm_max=loop_cfg.ahead_cm_max,
-            ultra_clear_cm=loop_cfg.ultra_clear_cm,
         )
 
     return dist_cm, ultra_countdown
