@@ -9,31 +9,18 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 
-from car_tools.camera_input import PiCarXCamera, CameraConfig
+from car_tools.camera_input import (
+    PiCarXCamera,
+    CameraConfig,
+    read_ultrasonic_cm,
+    ultrasonic_to_countdown,
+)
 from coordination.shared_map import SharedMap
 from car_tools.movement import MovementPlanner, PlanningConfig
 from car_tools.motor_controller import MotorController, MotorConfig
 from car_tools.picarx_path_follower import PathFollower, FollowerConfig
 from car_tools.obstacle_detection import MonocularVSLAM, CameraIntrinsics, VslamConfig
 from model import TargetPoint, Pose, Path  # Obstacle optional
-
-
-# ---------------- Ultrasonic helpers ----------------
-
-def read_ultrasonic_cm(motor: MotorController) -> Optional[float]:
-    """
-    Returns distance in cm, or None if invalid/unavailable.
-
-    PiCar-X examples use px.ultrasonic.read().
-    DeepWiki notes px.get_distance() is a wrapper around ultrasonic.read() and returns cm
-    """
-    px = getattr(motor, "px", None)
-    if px is None:
-        return None
-    d = float(px.get_distance())
-    if not np.isfinite(d) or d <= 0 or d > 500:
-        return None
-    return d
 
 
 @dataclass
@@ -45,7 +32,6 @@ class ReplanConfig:
     # ultrasonic thresholds (cm)
     # SunFounder obstacle avoidance lesson uses SafeDistance=40, DangerDistance=20
     ultra_replan_cm: float = 40.0       # "something ahead" => replan soon
-    ultra_emergency_cm: float = 20.0    # "too close" => stop/back up + replan
 
     # map injection: cm-to-grid scaling
     cm_per_grid: float = 50.0
@@ -57,10 +43,8 @@ class ReplanConfig:
     # if no obstacle for a while, clear the virtual obstacle
     ultra_clear_cm: float = 60.0
 
-    # if emergency, back up a bit
-    emergency_backup_s: float = 1
-    emergency_wait_high_conf_timeout_s: float = 3.0
-    emergency_wait_tick_s: float = 0.05
+    # ultrasonic sampling timer
+    ultra_timer_period_s: float = 0.1
 
     # pose-confidence gating
     min_pose_conf_for_replan: float = 0.55
@@ -94,7 +78,9 @@ def drive_to_goal_with_sparse_replan(
     steer_rate_limit = 12.0 # deg per control tick max change
 
     current_path: Optional[Path] = None
-    emergency_replan_required = False
+    ultra_countdown = 30
+    latest_ultra_cm: Optional[float] = None
+    last_ultra_tick_t: float = 0.0
     last_plan_t: float = 0.0
     last_ultra_t: float = 0.0
 
@@ -201,39 +187,43 @@ def drive_to_goal_with_sparse_replan(
         blue_ratio = float(getattr(status, "blue_ratio", 1.0))
         return conf, high_conf, blurry, inliers, contrast, blue_ratio
 
-    def wait_for_high_conf_slam(timeout_s: float) -> bool:
-        """
-        Hold position, keep SLAM updating, and wait until status becomes high-confidence.
-        """
-        deadline = time.time() + max(0.0, float(timeout_s))
-        while time.time() < deadline:
-            fr = camera.read()
-            if fr is None:
-                time.sleep(max(0.01, replan_cfg.emergency_wait_tick_s))
-                continue
-
-            try:
-                slam.tick(fr, translation_step=0.0)
-            except TypeError:
-                slam.cfg.translation_step = 0.0
-                slam.tick(fr)
-
-            if debug_show_keypoints:
-                dbg = slam.get_debug_keypoints_frame()
-                if dbg is not None:
-                    cv2.imshow("SLAM keypoints", dbg)
-                    cv2.waitKey(1)
-
-            _conf, high_conf, _blurry, _inliers, _contrast, _blue_ratio = slam_quality()
-            if high_conf:
-                return True
-
-            time.sleep(max(0.01, replan_cfg.emergency_wait_tick_s))
-
-        return False
-
     try:
         while (time.time() - t0) < timeout_s:
+            now = time.time()
+
+            # ---- Ultrasonic timer tick (0.1s by default) ----
+            if (now - last_ultra_tick_t) >= replan_cfg.ultra_timer_period_s:
+                last_ultra_tick_t = now
+                latest_ultra_cm = read_ultrasonic_cm(motor)
+                ultra_read_value = ultrasonic_to_countdown(latest_ultra_cm)
+
+                # Countdown update:
+                # 1) decrement current
+                # 2) clamp down to smaller freshly-read value
+                ultra_countdown = max(0, ultra_countdown - 1)
+                if ultra_read_value < ultra_countdown:
+                    ultra_countdown = ultra_read_value
+
+                pose_world_for_ultra = shared_map.get_pose(car_id, frame="world")
+                if pose_world_for_ultra is not None:
+                    _ = maybe_update_ultra_obstacle(pose_world_for_ultra, latest_ultra_cm)
+
+                # On zero, force A* replan now.
+                if ultra_countdown <= 0:
+                    goal = TargetPoint(float(goal_gx), float(goal_gy))
+                    current_path = planner.repath_to_target(
+                        current_path=current_path,
+                        target=goal,
+                        shared_map=shared_map,
+                        target_frame="grid",
+                        force_replan=True,
+                    )
+                    last_plan_t = time.time()
+                    ultra_countdown = max(1, ultra_read_value)
+
+                # Do not tick SLAM on ultrasonic-read cycles.
+                continue
+
             # ---- SLAM update ----
             frame = camera.read()
             if frame is None:
@@ -293,49 +283,8 @@ def drive_to_goal_with_sparse_replan(
                     )
                 continue
 
-            # ---- Ultrasonic check ----
-            dist_cm = read_ultrasonic_cm(motor)
-
-            # Emergency behavior
-            if dist_cm is not None and dist_cm <= replan_cfg.ultra_emergency_cm:
-                emergency_replan_required = True
-                motor.stop()
-                # back up a touch to create space
-                if replan_cfg.emergency_backup_s > 0:
-                    try:
-                        motor.backward_for(replan_cfg.emergency_backup_s, speed=max(15, motor.cfg.speed // 2))
-                    except Exception:
-                        pass
-
-                motor.stop()
-
-                # Use fresh ultrasonic + pose after backing up.
-                dist_after_backup = read_ultrasonic_cm(motor)
-                if dist_after_backup is None:
-                    dist_after_backup = dist_cm
-
-                # Wait for high-confidence SLAM before we commit to a new path.
-                got_high_conf = wait_for_high_conf_slam(replan_cfg.emergency_wait_high_conf_timeout_s)
-                pose_world_after = shared_map.get_pose(car_id, frame="world")
-                if pose_world_after is not None:
-                    _ = maybe_update_ultra_obstacle(pose_world_after, dist_after_backup)
-                else:
-                    _ = maybe_update_ultra_obstacle(pose_world, dist_after_backup)
-
-                if got_high_conf:
-                    goal = TargetPoint(float(goal_gx), float(goal_gy))
-                    current_path = planner.repath_to_target(
-                        current_path=current_path,
-                        target=goal,
-                        shared_map=shared_map,
-                        target_frame="grid",
-                        force_replan=True,
-                    )
-                    last_plan_t = time.time()
-                    emergency_replan_required = False
-
-                # Always skip motion this loop after an emergency event.
-                continue
+            # Use latest ultrasonic value collected by timer tick.
+            dist_cm = latest_ultra_cm
 
             obstacle_present = maybe_update_ultra_obstacle(pose_world, dist_cm)
 
@@ -351,23 +300,6 @@ def drive_to_goal_with_sparse_replan(
                     target_frame="grid",
                 )
                 last_plan_t = time.time()
-
-            if emergency_replan_required:
-                motor.stop()
-                if pose_high_conf:
-                    goal = TargetPoint(float(goal_gx), float(goal_gy))
-                    current_path = planner.repath_to_target(
-                        current_path=current_path,
-                        target=goal,
-                        shared_map=shared_map,
-                        target_frame="grid",
-                        force_replan=True,
-                    )
-                    last_plan_t = time.time()
-                    emergency_replan_required = False
-                else:
-                    time.sleep(max(0.01, replan_cfg.emergency_wait_tick_s))
-                    continue
 
             if current_path is None or len(current_path.waypoints) < 2:
                 motor.stop()
@@ -417,6 +349,7 @@ def drive_to_goal_with_sparse_replan(
                     f"pose_g=({pose_grid.x:.1f},{pose_grid.y:.1f},{pose_grid.theta:.2f}) "
                     f"goal=({goal_gx},{goal_gy}) d={d_goal:.1f} "
                     f"ultra={None if dist_cm is None else round(dist_cm,1)}cm "
+                    f"ultra_countdown={ultra_countdown} "
                     f"pose_conf={pose_conf:.2f} inliers={pose_inliers} blurry={pose_blurry} "
                     f"ctr={pose_contrast:.1f} blue={pose_blue_ratio:.2f} "
                     f"replan_in={(replan_cfg.replan_period_s - (now - last_plan_t)):.1f}s"
@@ -491,9 +424,8 @@ def main() -> None:
         replan_period_s=3.0,
         replan_min_interval_s=0.9,
         ultra_replan_cm=40.0,
-        ultra_emergency_cm=20.0,
         cm_per_grid=50.0,
-        emergency_backup_s=0.20,
+        ultra_timer_period_s=0.1,
     )
 
     # Planner (inflate obstacles; simplify path)
