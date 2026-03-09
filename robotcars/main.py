@@ -73,8 +73,7 @@ def drive_to_grid_goal(
         # Re plan path to goal every 5s
         if repathCount * 5 > (time.time() - t0):
             repathCount += 1
-            current_path = planner.repath_to_target(
-                current_path=current_path,
+            current_path = planner.plan_to_target(
                 target=goal,
                 shared_map=shared_map,
                 target_frame="grid",

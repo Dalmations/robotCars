@@ -1,4 +1,3 @@
-# main.py
 from __future__ import annotations
 
 import math
@@ -7,7 +6,6 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import cv2
-import numpy as np
 
 from car_tools.camera_input import (
     PiCarXCamera,
@@ -20,41 +18,88 @@ from car_tools.movement import MovementPlanner, PlanningConfig
 from car_tools.motor_controller import MotorController, MotorConfig
 from car_tools.picarx_path_follower import PathFollower, FollowerConfig
 from car_tools.obstacle_detection import MonocularVSLAM, CameraIntrinsics, VslamConfig
-from model import TargetPoint, Pose, Path  # Obstacle optional
+from model import TargetPoint, Path
 
 
 @dataclass
-class ReplanConfig:
-    # replan cadence
-    replan_period_s: float = 3.0
-    replan_min_interval_s: float = 1 # replan once a second if close
-
-    # ultrasonic thresholds (cm)
-    # SunFounder obstacle avoidance lesson uses SafeDistance=40, DangerDistance=20
-    ultra_replan_cm: float = 40.0       # "something ahead" => replan soon
-
-    # map injection: cm-to-grid scaling
+class LoopConfig:
     cm_per_grid: float = 50.0
-
-    # how far ahead to drop the virtual obstacle (cm from ultrasonic sensor)
     ahead_cm_min: float = 5.0
     ahead_cm_max: float = 120.0
-
-    # if no obstacle for a while, clear the virtual obstacle
     ultra_clear_cm: float = 60.0
-
-    # ultrasonic sampling timer
     ultra_timer_period_s: float = 0.1
 
-    # pose-confidence gating
     min_pose_conf_for_replan: float = 0.55
-    blurry_hold_after_no_replan_s: float = 3.0
     blurry_hold_pause_s: float = 0.20
 
+    log_period_s: float = 1.0
 
-# ---------------- Driving loop ----------------
 
-def drive_to_goal_with_sparse_replan(
+def _estimate_translation_step_cells(follower: PathFollower, motor: MotorController) -> float:
+    return float(follower.cfg.dt) / float(max(1e-6, motor.cfg.step_seconds))
+
+
+def _tick_ultrasonic(
+    *,
+    motor: MotorController,
+    shared_map: SharedMap,
+    loop_cfg: LoopConfig,
+    ultra_countdown: int,
+    car_id: int,
+) -> tuple[Optional[float], int]:
+    dist_cm = read_ultrasonic_cm(motor)
+    ultra_countdown = max(0, ultra_countdown - 1)
+    ultra_countdown = min(ultra_countdown, ultrasonic_to_countdown(dist_cm))
+
+    pose_world = shared_map.get_pose(car_id, frame="world")
+    if pose_world is not None:
+        shared_map.add_ultra_obstacle(
+            pose_world=pose_world,
+            dist_cm=dist_cm,
+            cm_per_grid=loop_cfg.cm_per_grid,
+            ahead_cm_min=loop_cfg.ahead_cm_min,
+            ahead_cm_max=loop_cfg.ahead_cm_max,
+            ultra_clear_cm=loop_cfg.ultra_clear_cm,
+        )
+
+    return dist_cm, ultra_countdown
+
+
+def _show_slam_debug_frame(slam: MonocularVSLAM) -> None:
+    frame = slam.get_debug_matches_frame()
+    if frame is None:
+        frame = slam.get_debug_keypoints_frame()
+    if frame is None:
+        return
+    cv2.imshow("SLAM debug", frame)
+    cv2.waitKey(1)
+
+
+def _log_drive_status(
+    *,
+    pose_grid,
+    goal_xy_grid: Tuple[int, int],
+    d_goal: float,
+    dist_cm: Optional[float],
+    ultra_countdown: int,
+    pose_conf: float,
+    pose_inliers: int,
+    pose_blurry: bool,
+    pose_contrast: float,
+    prefix: str = "",
+) -> None:
+    ultra_str = "None" if dist_cm is None else f"{round(dist_cm, 1)}cm"
+    print(
+        f"{prefix}"
+        f"pose_g=({pose_grid.x:.1f},{pose_grid.y:.1f},{pose_grid.theta:.2f}) "
+        f"goal=({goal_xy_grid[0]},{goal_xy_grid[1]}) d={d_goal:.1f} "
+        f"ultra={ultra_str} ultra_countdown={ultra_countdown} "
+        f"pose_conf={pose_conf:.2f} inliers={pose_inliers} blurry={pose_blurry} "
+        f"ctr={pose_contrast:.1f}"
+    )
+
+
+def drive_to_goal(
     goal_xy_grid: Tuple[int, int],
     *,
     shared_map: SharedMap,
@@ -63,188 +108,48 @@ def drive_to_goal_with_sparse_replan(
     motor: MotorController,
     slam: MonocularVSLAM,
     camera: PiCarXCamera,
-    replan_cfg: ReplanConfig,
+    loop_cfg: LoopConfig,
     car_id: int = 0,
     timeout_s: float = 180.0,
     debug_show_keypoints: bool = False,
 ) -> bool:
-    goal_gx, goal_gy = int(goal_xy_grid[0]), int(goal_xy_grid[1])
-
-    # Keep one "virtual obstacle" entry updated
-    ULTRA_OB_ID = "ultra_front"
-    steer_filt = 0.0
-    steer_alpha = 0.25      # 0.2–0.35 good
-    steer_deadband = 2.0    # degrees; ignore tiny noise
-    steer_rate_limit = 12.0 # deg per control tick max change
+    goal_xy_grid = (int(goal_xy_grid[0]), int(goal_xy_grid[1]))
 
     current_path: Optional[Path] = None
-    ultra_countdown = 30
     latest_ultra_cm: Optional[float] = None
-    last_ultra_tick_t: float = 0.0
-    last_plan_t: float = 0.0
-    last_ultra_t: float = 0.0
+    ultra_countdown = ultrasonic_to_countdown(None)
 
+    last_ultra_tick_t = 0.0
+    last_log_t = 0.0
     t0 = time.time()
-    last_print = 0.0
 
-    def slam_step_per_tick() -> float:
-        # motor.step_seconds ~ time to travel 1 grid cell
-        return float(follower.cfg.dt) / float(max(1e-6, motor.cfg.step_seconds))
-
-    def maybe_update_ultra_obstacle(pose_world: Pose, dist_cm: Optional[float]) -> bool:
-        """
-        Updates shared_map.obstacles[ULTRA_OB_ID] if dist is close enough.
-        Returns True if an obstacle is considered "present".
-        """
-        nonlocal last_ultra_t
-
-        if dist_cm is None:
-            # no update; keep last obstacle unless it's stale
-            return False
-
-        # Clear far readings
-        if dist_cm >= replan_cfg.ultra_clear_cm:
-            if ULTRA_OB_ID in shared_map.obstacles:
-                shared_map.obstacles.pop(ULTRA_OB_ID, None)
-            return False
-
-        # Replan range, inject an obstacle ahead
-        if dist_cm <= replan_cfg.ultra_replan_cm:
-            last_ultra_t = time.time()
-
-            # Convert distance->cells (clamped in cm first, then converted).
-            d_cm = float(np.clip(dist_cm, replan_cfg.ahead_cm_min, replan_cfg.ahead_cm_max))
-            d_cells = d_cm / max(1e-6, replan_cfg.cm_per_grid)
-
-            # Place obstacle "ahead" along heading in WORLD(nav) frame
-            ox = float(pose_world.x + d_cells * math.cos(pose_world.theta))
-            oy = float(pose_world.y + d_cells * math.sin(pose_world.theta))
-
-            # Fixed car footprint (not exposed as config): 20cm long x 14cm wide.
-            # Use half-diagonal as a conservative collision radius.
-            footprint_radius_cm = math.hypot(10.0, 7.0)
-            r_world = (footprint_radius_cm / max(1e-6, replan_cfg.cm_per_grid)) * float(shared_map.grid.resolution)
-
-            # Store as a simple duck-typed object with x,y,radius,obstacle_id
-            class _TmpObstacle:
-                __slots__ = ("obstacle_id", "x", "y", "radius")
-                def __init__(self, obstacle_id: str, x: float, y: float, radius: float):
-                    self.obstacle_id = obstacle_id
-                    self.x = x
-                    self.y = y
-                    self.radius = radius
-
-            shared_map.obstacles[ULTRA_OB_ID] = _TmpObstacle(ULTRA_OB_ID, ox, oy, r_world)
-            return True
-
-        return False
-
-    def need_replan(dist_cm: Optional[float], obstacle_present: bool) -> bool:
-        nonlocal last_plan_t
-
-        now = time.time()
-        since_plan = now - last_plan_t
-
-        # 1) No path yet
-        if current_path is None or len(current_path.waypoints) < 2:
-            return True
-
-        # 2) Periodic replan
-        if since_plan >= replan_cfg.replan_period_s:
-            return True
-
-        # 3) Immediate-ish replan when ultrasonic sees something close
-        # throttle to avoid replanning every dt due to noisy readings
-        if dist_cm is not None and dist_cm <= replan_cfg.ultra_replan_cm:
-            if since_plan >= replan_cfg.replan_min_interval_s:
-                return True
-
-        # 4) If current path is blocked by the current occupancy grid
-        if shared_map.is_path_blocked(current_path):
-            if since_plan >= replan_cfg.replan_min_interval_s:
-                return True
-
-        return False
-
-    def slam_quality() -> Tuple[float, bool, bool, int, float, float]:
-        """
-        Returns:
-          confidence, high_confidence, blurry, inlier_count, contrast, blue_ratio
-        """
-        try:
-            status = slam.get_status()
-        except Exception:
-            return 1.0, True, False, 0, 0.0, 1.0
-
-        conf = float(getattr(status, "confidence", 0.0))
-        high_conf = bool(
-            getattr(status, "high_confidence", False)
-            and conf >= float(replan_cfg.min_pose_conf_for_replan)
-        )
-        blurry = bool(getattr(status, "blurry", False))
-        inliers = int(getattr(status, "inlier_count", 0))
-        contrast = float(getattr(status, "contrast", 0.0))
-        blue_ratio = float(getattr(status, "blue_ratio", 1.0))
-        return conf, high_conf, blurry, inliers, contrast, blue_ratio
+    follower.reset()
 
     try:
         while (time.time() - t0) < timeout_s:
             now = time.time()
 
-            # ---- Ultrasonic timer tick (0.1s by default) ----
-            if (now - last_ultra_tick_t) >= replan_cfg.ultra_timer_period_s:
+            if (now - last_ultra_tick_t) >= loop_cfg.ultra_timer_period_s:
                 last_ultra_tick_t = now
-                latest_ultra_cm = read_ultrasonic_cm(motor)
-                ultra_read_value = ultrasonic_to_countdown(latest_ultra_cm)
+                latest_ultra_cm, ultra_countdown = _tick_ultrasonic(
+                    motor=motor,
+                    shared_map=shared_map,
+                    loop_cfg=loop_cfg,
+                    ultra_countdown=ultra_countdown,
+                    car_id=car_id,
+                )
 
-                # Countdown update:
-                # 1) decrement current
-                # 2) clamp down to smaller freshly-read value
-                ultra_countdown = max(0, ultra_countdown - 1)
-                if ultra_read_value < ultra_countdown:
-                    ultra_countdown = ultra_read_value
-
-                pose_world_for_ultra = shared_map.get_pose(car_id, frame="world")
-                if pose_world_for_ultra is not None:
-                    _ = maybe_update_ultra_obstacle(pose_world_for_ultra, latest_ultra_cm)
-
-                # On zero, force A* replan now.
-                if ultra_countdown <= 0:
-                    goal = TargetPoint(float(goal_gx), float(goal_gy))
-                    current_path = planner.repath_to_target(
-                        current_path=current_path,
-                        target=goal,
-                        shared_map=shared_map,
-                        target_frame="grid",
-                        force_replan=True,
-                    )
-                    last_plan_t = time.time()
-                    ultra_countdown = max(1, ultra_read_value)
-
-                # Do not tick SLAM on ultrasonic-read cycles.
-                continue
-
-            # ---- SLAM update ----
             frame = camera.read()
             if frame is None:
                 motor.stop()
                 time.sleep(0.05)
                 continue
 
-            step = slam_step_per_tick()
-            try:
-                slam.tick(frame, translation_step=step)
-            except TypeError:
-                slam.cfg.translation_step = float(step)
-                slam.tick(frame)
+            slam.tick(frame, translation_step=_estimate_translation_step_cells(follower, motor))
 
             if debug_show_keypoints:
-                dbg = slam.get_debug_keypoints_frame()
-                if dbg is not None:
-                    cv2.imshow("SLAM keypoints", dbg)
-                    cv2.waitKey(1)
+                _show_slam_debug_frame(slam)
 
-            # ---- Pose ----
             pose_grid = shared_map.get_pose(car_id, frame="grid")
             pose_world = shared_map.get_pose(car_id, frame="world")
             if pose_grid is None or pose_world is None:
@@ -252,107 +157,72 @@ def drive_to_goal_with_sparse_replan(
                 time.sleep(follower.cfg.dt)
                 continue
 
-            # ---- Goal check ----
-            d_goal = math.hypot(goal_gx - pose_grid.x, goal_gy - pose_grid.y)
+            d_goal = math.hypot(goal_xy_grid[0] - pose_grid.x, goal_xy_grid[1] - pose_grid.y)
             if d_goal <= follower.cfg.goal_tolerance:
                 motor.stop()
                 motor.mark_reached()
                 return True
 
-            pose_conf, pose_high_conf, pose_blurry, pose_inliers, pose_contrast, pose_blue_ratio = slam_quality()
-            now = time.time()
-            since_plan = (now - last_plan_t) if last_plan_t > 0 else 0.0
-            hold_for_pose_recovery = (
-                current_path is not None
-                and pose_blurry
-                and (not pose_high_conf)
-                and since_plan >= replan_cfg.blurry_hold_after_no_replan_s
+            pose_conf, pose_high_conf, pose_blurry, pose_inliers, pose_contrast = slam.slam_quality(
+                min_confidence=loop_cfg.min_pose_conf_for_replan
             )
 
-            if hold_for_pose_recovery:
+            if current_path is not None and pose_blurry and not pose_high_conf:
                 motor.stop()
-                time.sleep(max(0.01, replan_cfg.blurry_hold_pause_s))
-                if now - last_print > 1.0:
-                    last_print = now
-                    print(
-                        f"pose_g=({pose_grid.x:.1f},{pose_grid.y:.1f},{pose_grid.theta:.2f}) "
-                        f"goal=({goal_gx},{goal_gy}) d={d_goal:.1f} "
-                        f"pose_conf={pose_conf:.2f} inliers={pose_inliers} blurry={pose_blurry} "
-                        f"ctr={pose_contrast:.1f} blue={pose_blue_ratio:.2f} "
-                        f"hold=pose_recovery replan_in={(replan_cfg.replan_period_s - since_plan):.1f}s"
+                time.sleep(max(0.01, loop_cfg.blurry_hold_pause_s))
+                if (now - last_log_t) >= loop_cfg.log_period_s:
+                    last_log_t = now
+                    _log_drive_status(
+                        pose_grid=pose_grid,
+                        goal_xy_grid=goal_xy_grid,
+                        d_goal=d_goal,
+                        dist_cm=latest_ultra_cm,
+                        ultra_countdown=ultra_countdown,
+                        pose_conf=pose_conf,
+                        pose_inliers=pose_inliers,
+                        pose_blurry=pose_blurry,
+                        pose_contrast=pose_contrast,
+                        prefix="hold=pose_recovery ",
                     )
                 continue
 
-            # Use latest ultrasonic value collected by timer tick.
-            dist_cm = latest_ultra_cm
-
-            obstacle_present = maybe_update_ultra_obstacle(pose_world, dist_cm)
-
-            # ---- Replan
-            wants_replan = need_replan(dist_cm, obstacle_present)
-            can_replan = pose_high_conf or (current_path is None)
-            if wants_replan and can_replan:
-                goal = TargetPoint(float(goal_gx), float(goal_gy))
-                current_path = planner.repath_to_target(
-                    current_path=current_path,
-                    target=goal,
-                    shared_map=shared_map,
-                    target_frame="grid",
-                )
-                last_plan_t = time.time()
+            needs_path = current_path is None or ultra_countdown <= 0
+            if needs_path:
+                if pose_high_conf or current_path is None:
+                    current_path = planner.plan_to_target(
+                        target=TargetPoint(float(goal_xy_grid[0]), float(goal_xy_grid[1])),
+                        shared_map=shared_map,
+                        target_frame="grid",
+                    )
+                    ultra_countdown = max(1, ultrasonic_to_countdown(latest_ultra_cm))
+                else:
+                    motor.stop()
+                    time.sleep(max(0.01, loop_cfg.blurry_hold_pause_s))
+                    continue
 
             if current_path is None or len(current_path.waypoints) < 2:
+                current_path = None
                 motor.stop()
                 time.sleep(follower.cfg.dt)
                 continue
 
-            # ---- Track current path ----
-            # Slightly reduce lookahead near goal for docking
-            Ld = float(follower.cfg.lookahead)
-            if d_goal < 12.0:
-                Ld = max(6.0, min(Ld, 0.8 * d_goal))
-
-            tx, ty = follower._lookahead_point(current_path, pose_grid, Ld)
-            delta = follower._pure_pursuit_delta(pose_grid, target_x=tx, target_y=ty)
-            steer_deg = math.degrees(delta)
-
-            # Slow down when steering is large
-            steer_abs = abs(steer_deg)
-            maxs = float(motor.cfg.max_steer_deg)
-            base = int(motor.cfg.speed)
-            min_spd = max(15, int(0.55 * base))
-            spd = int(base - (base - min_spd) * min(1.0, steer_abs / max(1e-6, maxs)))
-
-            steer_cmd = steer_deg
-
-            # deadband (ignore tiny noise)
-            if abs(steer_cmd) < steer_deadband:
-                steer_cmd = 0.0
-
-            # EMA smoothing on steering command
-            steer_filt = (1.0 - steer_alpha) * steer_filt + steer_alpha * steer_cmd
-
-            # rate limit (per tick)
-            dmax = float(steer_rate_limit)
-            steer_filt = max(steer_cmd - dmax, min(steer_cmd + dmax, steer_filt))
-
-            # Use a constant speed while tuning (speed modulation causes jerk)
-            spd = int(motor.cfg.speed)
-
-            motor.set_steering(steer_filt)
-            motor.forward_for(follower.cfg.dt, speed=spd)
+            steer_deg = follower.steering_command(current_path, pose_grid, d_goal)
+            motor.set_steering(steer_deg)
+            motor.forward_for(follower.cfg.dt, speed=int(motor.cfg.speed))
 
             now = time.time()
-            if now - last_print > 1.0:
-                last_print = now
-                print(
-                    f"pose_g=({pose_grid.x:.1f},{pose_grid.y:.1f},{pose_grid.theta:.2f}) "
-                    f"goal=({goal_gx},{goal_gy}) d={d_goal:.1f} "
-                    f"ultra={None if dist_cm is None else round(dist_cm,1)}cm "
-                    f"ultra_countdown={ultra_countdown} "
-                    f"pose_conf={pose_conf:.2f} inliers={pose_inliers} blurry={pose_blurry} "
-                    f"ctr={pose_contrast:.1f} blue={pose_blue_ratio:.2f} "
-                    f"replan_in={(replan_cfg.replan_period_s - (now - last_plan_t)):.1f}s"
+            if (now - last_log_t) >= loop_cfg.log_period_s:
+                last_log_t = now
+                _log_drive_status(
+                    pose_grid=pose_grid,
+                    goal_xy_grid=goal_xy_grid,
+                    d_goal=d_goal,
+                    dist_cm=latest_ultra_cm,
+                    ultra_countdown=ultra_countdown,
+                    pose_conf=pose_conf,
+                    pose_inliers=pose_inliers,
+                    pose_blurry=pose_blurry,
+                    pose_contrast=pose_contrast,
                 )
 
     finally:
@@ -361,14 +231,10 @@ def drive_to_goal_with_sparse_replan(
     return False
 
 
-# ---------------- Main ----------------
-
 def main() -> None:
-    # Shared map / grid alignment
     shared_map = SharedMap()
     shared_map.configure_grid(size=(50, 50), resolution=1.0, origin_world=(-2.0, -2.0))
 
-    # Camera (Vilib)
     cam = PiCarXCamera(CameraConfig(
         display_local=False,
         display_web=False,
@@ -381,28 +247,29 @@ def main() -> None:
     ))
     cam.start()
 
-    # SLAM
     intr = CameraIntrinsics(fx=520.0, fy=520.0, cx=320.0, cy=240.0)
     slam = MonocularVSLAM(
-        intr, shared_map, car_id=0,
+        intr,
+        shared_map,
+        car_id=0,
         cfg=VslamConfig(
             input_color_order=cam.color_order,
             debug_draw_keypoints=True,
             debug_draw_matches=True,
-            translation_step=0.2,     # still overridden per tick
-            forward_sign=-1.0,        # IMPORTANT: you observed x decreasing
-            pose_ema_alpha=0.25,      # reduces jerk a lot
+            translation_step=0.2,
+            forward_sign=-1.0,
+            pose_ema_alpha=0.25,
             gray_use_clahe=True,
             gray_clahe_clip_limit=2.5,
             gray_clahe_tile_size=8,
             auto_white_balance=True,
-        )
+        ),
     )
 
     motor = MotorController(MotorConfig(
         speed=26,
-        step_seconds=0.40,           # tune later
-        brake_between_steps=False,   # continuous motion
+        step_seconds=0.40,
+        brake_between_steps=False,
         steering_slew_deg_per_s=90.0,
         steer_sign=1.0,
         steer_offset_deg=0.0,
@@ -418,39 +285,38 @@ def main() -> None:
         pose_frame="grid",
         steer_sign=1.0,
         max_steer_deg=motor.cfg.max_steer_deg,
+        steer_alpha=0.25,
+        steer_deadband_deg=2.0,
+        steer_rate_limit_deg_per_tick=12.0,
+        dock_distance_grid=12.0,
+        dock_min_lookahead_grid=6.0,
     ))
 
-    replan_cfg = ReplanConfig(
-        replan_period_s=3.0,
-        replan_min_interval_s=0.9,
-        ultra_replan_cm=40.0,
+    loop_cfg = LoopConfig(
         cm_per_grid=50.0,
         ultra_timer_period_s=0.1,
     )
 
-    # Planner (inflate obstacles; simplify path)
-    planner = MovementPlanner(planning_cfg=PlanningConfig(
-        include_slam_points=False,
-        inflation_radius_cells=0,
-        simplify_path=True,
-        nudge_start_goal=True,
-    ), world_size=(50, 50))
+    planner = MovementPlanner(
+        planning_cfg=PlanningConfig(
+            include_slam_points=False,
+            inflation_radius_cells=0,
+            simplify_path=True,
+            nudge_start_goal=True,
+        ),
+        world_size=(50, 50),
+    )
 
     try:
-        # Warm-up (let camera exposure settle)
         t_warm = time.time()
         while time.time() - t_warm < 1.0:
-            fr = cam.read()
-            if fr is not None:
-                try:
-                    slam.tick(fr, translation_step=0.0)
-                except TypeError:
-                    slam.cfg.translation_step = 0.0
-                    slam.tick(fr)
+            frame = cam.read()
+            if frame is not None:
+                slam.tick(frame, translation_step=0.0)
             time.sleep(0.02)
 
-        print("Drive (2,2) -> (45,45) with sparse replanning + ultrasonic triggers...")
-        ok = drive_to_goal_with_sparse_replan(
+        print("Drive (2,2) -> (45,45)...")
+        ok = drive_to_goal(
             (45, 45),
             shared_map=shared_map,
             planner=planner,
@@ -458,17 +324,16 @@ def main() -> None:
             motor=motor,
             slam=slam,
             camera=cam,
-            replan_cfg=replan_cfg,
+            loop_cfg=loop_cfg,
             timeout_s=180.0,
             debug_show_keypoints=True,
         )
         print("Reached (45,45):", ok)
 
-        # Square (inner square)
         square = [(45, 45), (5, 45), (5, 5), (45, 5), (45, 45)]
         print("Drive square:", square)
         for goal in square[1:]:
-            ok = drive_to_goal_with_sparse_replan(
+            ok = drive_to_goal(
                 goal,
                 shared_map=shared_map,
                 planner=planner,
@@ -476,7 +341,7 @@ def main() -> None:
                 motor=motor,
                 slam=slam,
                 camera=cam,
-                replan_cfg=replan_cfg,
+                loop_cfg=loop_cfg,
                 timeout_s=180.0,
                 debug_show_keypoints=True,
             )

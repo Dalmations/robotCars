@@ -17,7 +17,6 @@ class CarAgent:
         self.motor = motor
         self.follower = follower
         self._target: TargetPoint | None = None
-        self._current_path = None
 
     @classmethod
     def from_config(cls, car_id: int, cfg: Config) -> "CarAgent":
@@ -28,18 +27,16 @@ class CarAgent:
 
     def set_target(self, target: TargetPoint) -> None:
         self._target = target
-        self._current_path = None
 
     def step(self, shared_map: SharedMap) -> None:
         if self._target is None:
             return
-        self._current_path = self.planner.repath_to_target(
-            current_path=self._current_path,
+        path = self.planner.plan_to_target(
             target=self._target,
             shared_map=shared_map,
             target_frame="grid",
         )
-        self.follower.follow(self._current_path)
+        self.follower.follow(path)
 
     def at_target(self) -> bool:
         return self.motor.at_target()
