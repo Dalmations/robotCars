@@ -9,9 +9,6 @@ import cv2
 from vilib import Vilib
 
 
-ColorOrder = Literal["rgb", "bgr"]
-
-
 @dataclass
 class CameraConfig:
     display_local: bool = False
@@ -26,17 +23,14 @@ class CameraConfig:
 
 class PiCarXCamera:
     """
-    Thin Vilib wrapper.
-
-    The critical behavior here is that `read()` returns a copied frame so downstream
-    OpenCV code does not race with Vilib's live capture thread.
+    Vilib read() to capture frames, and handed to OpenCV for SLAM.
+    Warms up camera on start.
+    Includes ultrasonic read.
     """
 
     def __init__(self, cfg: Optional[CameraConfig] = None):
         self.cfg = cfg or CameraConfig()
         self._started = False
-        self.color_order: ColorOrder = self.cfg.output_color_order
-        self._last_color_print_t: float = 0.0
 
     def start(self) -> None:
         if self._started:
@@ -89,7 +83,7 @@ class PiCarXCamera:
 
     def read(self) -> Optional[np.ndarray]:
         """
-        Returns a copied frame in the configured output color order.
+        Returns a copied frame.
         """
         if not self._started:
             return None
