@@ -123,7 +123,7 @@ def drive_to_goal(
     try:
         while (time.time() - t0) < timeout_s:
             now = time.time()
-
+            # Check ultrasonic every ultra_timer_period_s
             if (now - last_ultra_tick_t) >= loop_cfg.ultra_timer_period_s:
                 last_ultra_tick_t = now
                 latest_ultra_cm, ultra_countdown = _tick_ultrasonic(
@@ -134,6 +134,7 @@ def drive_to_goal(
                     car_id=car_id,
                 )
 
+            # Read camera cosntantly and tick slam with output
             frame = camera.read()
             if frame is None:
                 motor.stop()
@@ -150,13 +151,15 @@ def drive_to_goal(
                 motor.stop()
                 time.sleep(follower.cfg.dt)
                 continue
-
+            
+            # Compute distance to goal
             d_goal = math.hypot(goal_xy_grid[0] - pose_grid.x, goal_xy_grid[1] - pose_grid.y)
             if d_goal <= follower.cfg.goal_tolerance:
                 motor.stop()
                 motor.mark_reached()
                 return True
 
+            # Check quality of slam frames
             pose_conf, pose_high_conf, pose_blurry, pose_inliers, pose_contrast = slam.slam_quality(
                 min_confidence=loop_cfg.min_pose_conf_for_replan
             )
@@ -173,11 +176,13 @@ def drive_to_goal(
                 prefix="hold=pose_recovery ",
                 )
 
+            # If a blurry and low confidence frame, stop to capture a better frame.
             if current_path is not None and pose_blurry and not pose_high_conf:
                 motor.stop()
                 time.sleep(max(0.01, loop_cfg.blurry_hold_pause_s))
                 continue
-
+            
+            # Every 3, 1, or 0s, recalculate path based on ultrasonic input.
             needs_path = current_path is None or ultra_countdown <= 0
             if needs_path:
                 if pose_high_conf or current_path is None:
@@ -197,7 +202,8 @@ def drive_to_goal(
                 motor.stop()
                 time.sleep(follower.cfg.dt)
                 continue
-
+            
+            # Set steering
             steer_deg = follower.steering_command(current_path, pose_grid, d_goal)
             motor.set_steering(steer_deg)
             motor.forward_for(follower.cfg.dt, speed=int(motor.cfg.speed))
