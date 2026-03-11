@@ -3,11 +3,13 @@ import queue
 from car_tools.movement import MovementPlanner
 from car_tools.motor_controller import MotorController, MotorConfig
 from car_tools.picarx_path_follower import PurePursuitFollower, FollowerConfig
-from speech_input.test_phrase_to_bucket import classify
+# from speech_input.test_phrase_to_bucket import classify
+from speech_input.classification_MVP import classify
+from picarx.stt import Vosk
 
 
 from comms.MQTTClient import MQTTClient
-from typing import override
+from typing_extensions import override
 class FollowerClient(MQTTClient):
     def __init__(self, id, broker_ip, broker_port=1883):
         super().__init__(id, broker_ip, broker_port)
@@ -19,7 +21,7 @@ class FollowerClient(MQTTClient):
         self.message_q.put(msg)
 
 
-def main():
+def follower_main():
     fc = FollowerClient('Robot1', "10.183.37.93")
     fc.start() 
     planner = MovementPlanner()
@@ -28,12 +30,32 @@ def main():
     while True:
         try:
             msg = fc.message_q.get()
-            # msg = {'message':'circle'}
-            shape = classify(msg['message'])
+            shape = msg['message']
             path = planner.plan_formation(shape)
             follower.follow(path)
             motor.stop()
         finally:
             motor.stop()
 
-main()
+def leader_main():
+    fc = FollowerClient('Leader', 'localhost')
+    fc.start() 
+    planner = MovementPlanner()
+    motor = MotorController(MotorConfig(speed=80))
+    follower = PurePursuitFollower(motor, FollowerConfig())
+    vosk = Vosk(language="en-us")
+    while True:
+        try:
+            phrase = vosk.listen(stream=False)
+            if not phrase:
+                continue
+            shape = classify(phrase)
+            fc.publish_broadcast({'message':shape})
+            fc.message_q.get()
+            path = planner.plan_formation(shape)
+            follower.follow(path)
+            motor.stop()
+        finally:
+            motor.stop()
+
+leader_main()

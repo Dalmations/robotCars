@@ -1,85 +1,69 @@
+import os
+import pickle
 import numpy as np
 from sentence_transformers import SentenceTransformer
+from shapes import SHAPES
 
-SHAPES = {
-    "circle": [
-        "a round shape",
-        "a shape with no corners",
-        "perfectly circular object",
-        "all points equally distant from the center",
-        "no edges or vertices",
-        'circle'
-    ],
-    "triangle": [
-        "a shape with three sides",
-        "three cornered polygon",
-        "polygon with three angles",
-        "three straight edges meeting at vertices",
-        "a three sided figure",
-        'triangle'
-    ],
-    "rectangle": [
-        "a shape with four right angles",
-        "a box-like shape with equal opposite sides",
-        "four sided shape with ninety degree corners",
-        "opposite sides are parallel and equal",
-        "a rectangular figure",
-        'rectangle'
-    ],
-    "parallelogram": [
-        "a slanted rectangle",
-        "four sided shape with opposite sides parallel",
-        "a quadrilateral with parallel opposite edges",
-        "a skewed four sided polygon",
-        "a sloping four sided shape",
-        'parallelogram'
-    ],
-    "pentagon": [
-        "a shape with five sides",
-        "five sided polygon",
-        "a polygon with five angles",
-        "five straight edges forming a closed shape",
-        "a five cornered figure",
-        'pentagon'
-    ]
-}
-THRESHOLD = 0.60
+EMBEDDING_FILE = "robotcars/speech_input/shape_embeddings.pkl"
+THRESHOLD = 0.6
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 def embed(texts):
-    return model.encode(
-        texts,
-        normalize_embeddings=True
-    )
+    return model.encode(texts, normalize_embeddings=True)
 
-shape_matrices = {}
-shape_labels = []
+def load_or_build_phrase_embeddings():
+    if os.path.exists(EMBEDDING_FILE):
+        with open(EMBEDDING_FILE, "rb") as f:
+            phrase_to_vec = pickle.load(f)
+    else:
+        phrase_to_vec = {}
 
-all_vectors = []
-all_shapes = []
+    updated = False
 
-for shape, phrases in SHAPES.items():
-    vecs = embed(phrases)
-    shape_matrices[shape] = vecs
-    all_vectors.append(vecs)
-    all_shapes.extend([shape] * vecs.shape[0])
+    for shape, phrases in SHAPES.items():
+        for phrase in phrases:
+            if phrase not in phrase_to_vec:
+                phrase_to_vec[phrase] = embed([phrase])[0]
+                updated = True
 
-ALL_VECTORS = np.vstack(all_vectors)
-ALL_SHAPES = np.array(all_shapes)
+    if updated:
+        with open(EMBEDDING_FILE, "wb") as f:
+            pickle.dump(phrase_to_vec, f)
+
+    return phrase_to_vec
+
+def build_centroids(phrase_to_vec):
+    shape_centroids = {}
+
+    for shape, phrases in SHAPES.items():
+        vectors = np.vstack([phrase_to_vec[p] for p in phrases])
+        centroid = np.mean(vectors, axis=0)
+
+        centroid = centroid / np.linalg.norm(centroid)
+
+        shape_centroids[shape] = centroid
+
+    return shape_centroids
+
+phrase_to_vec = load_or_build_phrase_embeddings()
+shape_centroids = build_centroids(phrase_to_vec)
+
+CENTROID_MATRIX = np.vstack(list(shape_centroids.values()))
+CENTROID_LABELS = np.array(list(shape_centroids.keys()))
 
 def classify(phrase):
-    phrase_vec = embed(phrase) 
-    phrase_vec = phrase_vec.reshape(-1) 
+    phrase_vec = embed([phrase])[0]
 
-    scores = ALL_VECTORS @ phrase_vec
-
+    scores = CENTROID_MATRIX @ phrase_vec
     best_idx = np.argmax(scores)
     best_score = scores[best_idx]
-    best_shape = ALL_SHAPES[best_idx]
+    print(best_score)
 
-    return best_shape if best_score >= THRESHOLD else 'No match'
+    if best_score >= THRESHOLD:
+        return CENTROID_LABELS[best_idx]
+    return "No match"
 
-# while True:
-#     phrase = input('input phrase\n')
-#     print(classify(phrase),'\n')
+while True:
+    phrase = input('input phrase\n')
+    print(classify(phrase),'\n')
