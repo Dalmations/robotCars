@@ -46,9 +46,11 @@ def leader_main():
     vosk = Vosk(language="en-us")
     while True:
         try:
+            print('Listening')
             phrase = vosk.listen(stream=False)
+            print(phrase)
             if not phrase:
-                continue
+               continue
             shape = classify(phrase)
             fc.publish_broadcast({'message':shape})
             fc.message_q.get()

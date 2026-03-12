@@ -1,5 +1,5 @@
 import re
-from shapes import SHAPES
+from speech_input.shapes import SHAPES
 
 pattern = re.compile(r"\b(" + "|".join(SHAPES.keys()) + r")s?\b", re.IGNORECASE)
 

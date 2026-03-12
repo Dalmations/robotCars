@@ -25,7 +25,7 @@ class FollowerConfig:
     """
     lookahead: float = 3.0              # grid units
     wheelbase: float = 2.0              # grid units 
-    v: float = 5.0                      # grid units per second
+    v: float = 7.75                      # grid units per second
     dt: float = 0.10                    # seconds per control update
 
     max_steer_deg: float = 35.0         # clamp to match MotorConfig.max_steer_deg
