@@ -8,6 +8,11 @@ import numpy as np
 
 from model import Observations, Pose, Scenario, TargetPoint, Path, Obstacle
 
+try:
+    import cv2
+except Exception:  # pragma: no cover
+    cv2 = None
+
 
 GridPoint = Tuple[int, int]
 FrameName = Literal["world", "grid"]
@@ -280,3 +285,153 @@ class SharedMap:
                     if 0 <= x < w and 0 <= y < h and grid[x, y] == 0:
                         return TargetPoint(x=float(x), y=float(y))
         return target
+
+    def render_grid_debug_view(
+        self,
+        *,
+        car_id: int = 0,
+        path: Optional[Path] = None,
+        target: Optional[TargetPoint] = None,
+        size: Optional[Tuple[int, int]] = None,
+        include_slam_points: bool = False,
+        slam_points_max: int = 1000,
+        cell_px: int = 14,
+        margin_px: int = 24,
+    ) -> np.ndarray:
+        """
+        Render a 2D planning-grid view showing occupancy, pose, path, and target.
+        """
+        size = size if size is not None else self.grid.size
+        w, h = int(size[0]), int(size[1])
+        cell_px = max(8, int(cell_px))
+        margin_px = max(8, int(margin_px))
+
+        grid = self.to_occupancy_grid(size=size, include_slam_points=False)
+
+        free_color = np.array((242, 244, 246), dtype=np.uint8)
+        obstacle_color = np.array((70, 85, 165), dtype=np.uint8)
+        grid_line_color = (214, 220, 226)
+        path_color = (66, 180, 255)
+        target_color = (0, 210, 255)
+        pose_color = (46, 184, 92)
+        slam_color = (148, 148, 148)
+        text_color = (40, 40, 40)
+
+        canvas_h = h * cell_px + 2 * margin_px
+        canvas_w = w * cell_px + 2 * margin_px
+        canvas = np.full((canvas_h, canvas_w, 3), 255, dtype=np.uint8)
+
+        for gx in range(w):
+            for gy in range(h):
+                x0 = margin_px + gx * cell_px
+                y0 = margin_px + (h - 1 - gy) * cell_px
+                color = obstacle_color if grid[gx, gy] else free_color
+                canvas[y0:y0 + cell_px, x0:x0 + cell_px] = color
+
+        def grid_to_px(x_grid: float, y_grid: float) -> Tuple[int, int]:
+            px = int(round(margin_px + (float(x_grid) + 0.5) * cell_px))
+            py = int(round(margin_px + (h - float(y_grid) - 0.5) * cell_px))
+            return px, py
+
+        def fill_cell(x_grid: int, y_grid: int, color: Tuple[int, int, int], pad: int = 2) -> None:
+            if not (0 <= x_grid < w and 0 <= y_grid < h):
+                return
+            x0 = margin_px + x_grid * cell_px + pad
+            y0 = margin_px + (h - 1 - y_grid) * cell_px + pad
+            x1 = margin_px + (x_grid + 1) * cell_px - pad
+            y1 = margin_px + (h - y_grid) * cell_px - pad
+            if x1 <= x0 or y1 <= y0:
+                return
+            canvas[y0:y1, x0:x1] = np.array(color, dtype=np.uint8)
+
+        if include_slam_points and self.map_points:
+            points = self.map_points[-slam_points_max:] if slam_points_max > 0 else self.map_points
+            for xw, yw, _zw in points:
+                gx, gy = self.world_to_grid(xw, yw, clamp=False)
+                if 0 <= gx < w and 0 <= gy < h:
+                    if cv2 is not None:
+                        cv2.circle(canvas, grid_to_px(gx, gy), max(1, cell_px // 6), slam_color, -1, lineType=cv2.LINE_AA)
+                    else:
+                        fill_cell(gx, gy, slam_color, pad=max(3, cell_px // 3))
+
+        if cv2 is not None:
+            for gx in range(w + 1):
+                x = margin_px + gx * cell_px
+                cv2.line(canvas, (x, margin_px), (x, margin_px + h * cell_px), grid_line_color, 1, lineType=cv2.LINE_AA)
+            for gy in range(h + 1):
+                y = margin_px + gy * cell_px
+                cv2.line(canvas, (margin_px, y), (margin_px + w * cell_px, y), grid_line_color, 1, lineType=cv2.LINE_AA)
+
+        if path is not None and path.waypoints:
+            if cv2 is not None and len(path.waypoints) >= 2:
+                pts = np.array([grid_to_px(wp.x, wp.y) for wp in path.waypoints], dtype=np.int32).reshape(-1, 1, 2)
+                cv2.polylines(
+                    canvas,
+                    [pts],
+                    False,
+                    path_color,
+                    thickness=max(2, cell_px // 4),
+                    lineType=cv2.LINE_AA,
+                )
+                for wp in path.waypoints:
+                    cv2.circle(canvas, grid_to_px(wp.x, wp.y), max(2, cell_px // 5), path_color, -1, lineType=cv2.LINE_AA)
+            else:
+                for wp in path.waypoints:
+                    fill_cell(int(round(wp.x)), int(round(wp.y)), path_color, pad=max(2, cell_px // 5))
+
+        if target is not None:
+            if cv2 is not None:
+                cv2.drawMarker(
+                    canvas,
+                    grid_to_px(target.x, target.y),
+                    target_color,
+                    markerType=cv2.MARKER_TILTED_CROSS,
+                    markerSize=max(10, cell_px),
+                    thickness=max(1, cell_px // 5),
+                    line_type=cv2.LINE_AA,
+                )
+            else:
+                fill_cell(int(round(target.x)), int(round(target.y)), target_color, pad=max(2, cell_px // 5))
+
+        pose_grid = self.get_pose(car_id, frame="grid")
+        if pose_grid is not None:
+            center = grid_to_px(pose_grid.x, pose_grid.y)
+            if cv2 is not None:
+                arrow_len = max(10, int(round(1.6 * cell_px)))
+                tip = (
+                    int(round(center[0] + arrow_len * math.cos(pose_grid.theta))),
+                    int(round(center[1] - arrow_len * math.sin(pose_grid.theta))),
+                )
+                cv2.circle(canvas, center, max(3, cell_px // 3), pose_color, -1, lineType=cv2.LINE_AA)
+                cv2.arrowedLine(
+                    canvas,
+                    center,
+                    tip,
+                    pose_color,
+                    thickness=max(2, cell_px // 5),
+                    tipLength=0.35,
+                    line_type=cv2.LINE_AA,
+                )
+            else:
+                fill_cell(int(round(pose_grid.x)), int(round(pose_grid.y)), pose_color, pad=max(2, cell_px // 5))
+
+        if cv2 is not None:
+            info = [f"car={car_id}"]
+            if pose_grid is not None:
+                info.append(f"pose=({pose_grid.x:.1f},{pose_grid.y:.1f},{pose_grid.theta:.2f})")
+            if target is not None:
+                info.append(f"target=({target.x:.0f},{target.y:.0f})")
+            if path is not None:
+                info.append(f"wps={len(path.waypoints)}")
+            cv2.putText(
+                canvas,
+                "  ".join(info),
+                (margin_px, max(18, margin_px - 6)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                text_color,
+                1,
+                lineType=cv2.LINE_AA,
+            )
+
+        return canvas

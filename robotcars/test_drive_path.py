@@ -62,12 +62,28 @@ def _tick_ultrasonic(
 
 
 def _show_slam_debug_frame(slam: MonocularVSLAM) -> None:
-    frame = slam.get_debug_matches_frame()
-    if frame is None:
-        frame = slam.get_debug_keypoints_frame()
+    # frame = slam.get_debug_matches_frame()
+    frame = slam.get_debug_keypoints_frame()
     if frame is None:
         return
     cv2.imshow("SLAM debug", frame)
+    cv2.waitKey(1)
+
+
+def _show_grid_debug_frame(
+    *,
+    shared_map: SharedMap,
+    current_path: Optional[Path],
+    target: TargetPoint,
+    car_id: int,
+) -> None:
+    frame = shared_map.render_grid_debug_view(
+        car_id=car_id,
+        path=current_path,
+        target=target,
+        cell_px=14,
+    )
+    cv2.imshow("Planning debug", frame)
     cv2.waitKey(1)
 
 
@@ -110,6 +126,7 @@ def drive_to_goal(
     debug_show_keypoints: bool = False,
 ) -> bool:
     goal_xy_grid = (int(goal_xy_grid[0]), int(goal_xy_grid[1]))
+    goal_target = TargetPoint(float(goal_xy_grid[0]), float(goal_xy_grid[1]))
 
     current_path: Optional[Path] = None
     latest_ultra_cm: Optional[float] = None
@@ -187,10 +204,17 @@ def drive_to_goal(
             if needs_path:
                 if pose_high_conf or current_path is None:
                     current_path = planner.plan_to_target(
-                        target=TargetPoint(float(goal_xy_grid[0]), float(goal_xy_grid[1])),
+                        target=goal_target,
                         shared_map=shared_map,
                         target_frame="grid",
                     )
+                    if debug_show_keypoints:
+                        _show_grid_debug_frame(
+                            shared_map=shared_map,
+                            current_path=current_path,
+                            target=goal_target,
+                            car_id=car_id,
+                        )
                     ultra_countdown = max(1, ultrasonic_to_countdown(latest_ultra_cm))
                 else:
                     motor.stop()
