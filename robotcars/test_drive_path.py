@@ -251,7 +251,7 @@ def drive_to_goal(
 
 def main() -> None:
     shared_map = SharedMap()
-    shared_map.configure_grid(size=(50, 50), resolution=1.0, origin_world=(-2.0, -2.0))
+    shared_map.configure_grid(size=(50, 50), resolution=1.0, origin_world=(-7.0, -7.0))
 
     cam = PiCarXCamera(CameraConfig(
         display_local=False,
