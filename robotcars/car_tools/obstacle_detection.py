@@ -55,7 +55,6 @@ class VslamConfig:
 
     forward_sign: float = 1.0
     pose_ema_alpha: float = 0.2
-    input_color_order: str = "rgb"
 
     confidence_ema_alpha: float = 0.25
     confidence_good_threshold: float = 0.55
@@ -204,8 +203,8 @@ class MonocularVSLAM:
 
     # ---------------- Main update ----------------
 
-    def tick(self, frame_bgr_or_rgb: np.ndarray, translation_step: Optional[float] = None) -> Optional[Pose]:
-        gray, frame_stats = self._to_gray(frame_bgr_or_rgb)
+    def tick(self, frame_rgb: np.ndarray, translation_step: Optional[float] = None) -> Optional[Pose]:
+        gray, frame_stats = self._to_gray(frame_rgb)
         pts_xy, des = self._extract(gray)
 
         sharpness = self._frame_sharpness(gray)
@@ -452,15 +451,9 @@ class MonocularVSLAM:
                 color = np.clip(color, 0, 255).astype(np.uint8)
             color = np.ascontiguousarray(color)
 
-            order = str(self.cfg.input_color_order).lower()
-            if order == "bgr":
-                b = color[:, :, 0].astype(np.float32)
-                g_ch = color[:, :, 1].astype(np.float32)
-                r = color[:, :, 2].astype(np.float32)
-            else:
-                r = color[:, :, 0].astype(np.float32)
-                g_ch = color[:, :, 1].astype(np.float32)
-                b = color[:, :, 2].astype(np.float32)
+            r = color[:, :, 0].astype(np.float32)
+            g_ch = color[:, :, 1].astype(np.float32)
+            b = color[:, :, 2].astype(np.float32)
 
             stats = {
                 "mean_r": float(r.mean()),
@@ -470,21 +463,15 @@ class MonocularVSLAM:
 
             gray_source = str(self.cfg.gray_source).lower()
             if self.cfg.auto_white_balance and gray_source != "green":
-                color = self._gray_world_balance(color, order=order, max_gain=float(self.cfg.max_channel_gain))
+                color = self._gray_world_balance(color, max_gain=float(self.cfg.max_channel_gain))
 
             if gray_source == "green":
                 gray = color[:, :, 1]
             elif gray_source == "y_channel":
-                if order == "bgr":
-                    ycc = cv2.cvtColor(color, cv2.COLOR_BGR2YCrCb)
-                else:
-                    ycc = cv2.cvtColor(color, cv2.COLOR_RGB2YCrCb)
+                ycc = cv2.cvtColor(color, cv2.COLOR_RGB2YCrCb)
                 gray = ycc[:, :, 0]
             else:
-                if order == "bgr":
-                    gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
-                else:
-                    gray = cv2.cvtColor(color, cv2.COLOR_RGB2GRAY)
+                gray = cv2.cvtColor(color, cv2.COLOR_RGB2GRAY)
 
         if gray.dtype != np.uint8:
             gray = np.clip(gray, 0, 255).astype(np.uint8)
@@ -553,19 +540,14 @@ class MonocularVSLAM:
         return lut
 
     @staticmethod
-    def _gray_world_balance(img: np.ndarray, *, order: str, max_gain: float) -> np.ndarray:
+    def _gray_world_balance(img: np.ndarray, *, max_gain: float) -> np.ndarray:
         if img.ndim != 3 or img.shape[2] < 3:
             return img
 
         out = img.astype(np.float32)
-        if order == "bgr":
-            b = out[:, :, 0]
-            g = out[:, :, 1]
-            r = out[:, :, 2]
-        else:
-            r = out[:, :, 0]
-            g = out[:, :, 1]
-            b = out[:, :, 2]
+        r = out[:, :, 0]
+        g = out[:, :, 1]
+        b = out[:, :, 2]
 
         mr = float(np.mean(r))
         mg = float(np.mean(g))
@@ -580,15 +562,9 @@ class MonocularVSLAM:
         gr = gain(mr)
         gg = gain(mg)
         gb = gain(mb)
-
-        if order == "bgr":
-            out[:, :, 0] *= gb
-            out[:, :, 1] *= gg
-            out[:, :, 2] *= gr
-        else:
-            out[:, :, 0] *= gr
-            out[:, :, 1] *= gg
-            out[:, :, 2] *= gb
+        out[:, :, 0] *= gr
+        out[:, :, 1] *= gg
+        out[:, :, 2] *= gb
 
         return np.clip(out, 0.0, 255.0).astype(np.uint8)
 

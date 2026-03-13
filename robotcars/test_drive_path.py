@@ -223,7 +223,6 @@ def main() -> None:
         display_web=False,
         frame_size=(640, 480),
         frame_rate=30,
-        debug_color_stats=True,
         camera_controls={"Saturation": 0.80},
     ))
     cam.start()
