@@ -32,6 +32,9 @@ class FollowerConfig:
     goal_tolerance: float = 3.0         # grid units to final waypoint
     speed_cmd: int = 100                 # motor_controller speed (0..100)
 
+    safe_dist: float = 40.0        # cm: Start slowing down
+    stop_dist: float = 10.0        # cm: Complete stop
+
 
 class Pose2D:
     __slots__ = ("x", "y", "yaw")
@@ -95,24 +98,43 @@ class PurePursuitFollower:
                 if self._dist((pose.x, pose.y), goal) <= self.cfg.goal_tolerance and time.perf_counter()-loop_start > 2:
                     break
 
-                target = self._lookahead_point(pose, pts, self.cfg.lookahead)
-                steer_deg = self._pure_pursuit_steer_deg(pose, target)
+                scalar = self._get_speed_scaler()
+                scaled_speed = int(self.cfg.speed_cmd*scalar)
+                self.motor.set_speed(scaled_speed)
 
-                # Clamp to safe steering
-                steer_deg = max(-self.cfg.max_steer_deg, min(self.cfg.max_steer_deg, steer_deg))
+                if self.motor.cfg.speed > 0:
+                    target = self._lookahead_point(pose, pts, self.cfg.lookahead)
+                    steer_deg = self._pure_pursuit_steer_deg(pose, target)
 
-                # Command hardware
-                self.motor.set_steering(steer_deg)
-                self.motor.forward_for(self.cfg.dt)
+                    # Clamp to safe steering
+                    steer_deg = max(-self.cfg.max_steer_deg, min(self.cfg.max_steer_deg, steer_deg))
 
-                # Dead-reckoning pose update (grid bicycle model)
-                pose = self._update_pose(pose, steer_deg, self.cfg.v, self.cfg.wheelbase, self.cfg.dt)
-                # pose = Pose2D(target[0],target[1],pose.yaw)
+                    # Command hardware
+                    self.motor.set_steering(steer_deg)
+                    self.motor.forward_for(self.cfg.dt)
+
+                    # Dead-reckoning pose update (grid bicycle model)
+                    pose = self._update_pose(pose, steer_deg, scaled_speed/12.9, self.cfg.wheelbase, self.cfg.dt)
+                    # pose = Pose2D(target[0],target[1],pose.yaw)
+                else:
+                    time.sleep(self.cfg.dt)
 
         finally:
             f.close()
             self.motor.set_steering(0.0)
             self.motor.mark_reached()
+
+    def _get_speed_scaler(self) -> float:
+            """
+            Returns a multiplier between 0.0 and 1.0 based on ultrasonic data.
+            """
+            distance = self.motor.px.get_distance()
+            if distance > self.cfg.safe_dist:
+                return 1.0
+            if distance <= self.cfg.stop_dist:
+                return 0.0
+            # Linear interpolation: (dist - stop) / (safe - stop)
+            return (distance - self.cfg.stop_dist) / (self.cfg.safe_dist - self.cfg.stop_dist)
 
     # -------------------------
     # Pure Pursuit math
