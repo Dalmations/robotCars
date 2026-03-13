@@ -30,6 +30,11 @@ class LoopConfig:
 
     min_pose_conf_for_replan: float = 0.55
     blurry_hold_pause_s: float = 0.20
+    close_obstacle_replan_cm: float = 15.0
+    weak_pose_replan_countdown: int = 3
+    stuck_timeout_s: float = 3.0
+    stuck_reverse_s: float = 0.30
+    stuck_reverse_speed_scale: float = 0.6
 
 
 def _estimate_translation_step_cells(follower: PathFollower, motor: MotorController) -> float:
@@ -85,6 +90,50 @@ def _show_grid_debug_frame(
     )
     cv2.imshow("Planning debug", frame)
     cv2.waitKey(1)
+
+
+def _plan_goal_path(
+    *,
+    planner: MovementPlanner,
+    shared_map: SharedMap,
+    goal_target: TargetPoint,
+    debug_show_keypoints: bool,
+    car_id: int,
+) -> Path:
+    path = planner.plan_to_target(
+        target=goal_target,
+        shared_map=shared_map,
+        target_frame="grid",
+    )
+    if debug_show_keypoints:
+        _show_grid_debug_frame(
+            shared_map=shared_map,
+            current_path=path,
+            target=goal_target,
+            car_id=car_id,
+        )
+    return path
+
+
+def _recover_from_stuck(
+    *,
+    motor: MotorController,
+    loop_cfg: LoopConfig,
+    latest_ultra_cm: Optional[float],
+    last_motion_t: float,
+) -> tuple[bool, float]:
+    motor.stop()
+
+    close_obstacle = latest_ultra_cm is not None and latest_ultra_cm <= loop_cfg.close_obstacle_replan_cm
+    if close_obstacle and (time.time() - last_motion_t) >= loop_cfg.stuck_timeout_s:
+        motor.set_steering(0.0)
+        reverse_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.stuck_reverse_speed_scale))))
+        motor.backward_for(loop_cfg.stuck_reverse_s, speed=reverse_speed)
+        motor.stop()
+        return True, time.time()
+
+    time.sleep(max(0.01, loop_cfg.blurry_hold_pause_s))
+    return False, last_motion_t
 
 
 def _log_drive_status(
@@ -143,6 +192,7 @@ def drive_to_goal(
 
     last_ultra_tick_t = 0.0
     t0 = time.time()
+    last_motion_t = t0
 
     follower.reset()
 
@@ -210,31 +260,52 @@ def drive_to_goal(
                 time.sleep(max(0.01, loop_cfg.blurry_hold_pause_s))
                 continue
             
-            # Every 3, 1, or 0s, recalculate path based on ultrasonic input.
-            needs_path = current_path is None or ultra_countdown <= 0
+            path_blocked = current_path is not None and planner.is_obstructed(current_path, shared_map)
+
+            # Recalculate when bootstrapping, when the ultrasonic demands it, or when the path is now blocked.
+            needs_path = current_path is None or ultra_countdown <= 0 or path_blocked
             if needs_path:
-                if pose_high_conf or current_path is None:
-                    current_path = planner.plan_to_target(
-                        target=goal_target,
+                close_obstacle = latest_ultra_cm is not None and latest_ultra_cm <= loop_cfg.close_obstacle_replan_cm
+                allow_weak_pose_replan = ultra_countdown <= 0 and close_obstacle
+
+                if current_path is None or pose_high_conf or allow_weak_pose_replan:
+                    current_path = _plan_goal_path(
+                        planner=planner,
                         shared_map=shared_map,
-                        target_frame="grid",
+                        goal_target=goal_target,
+                        debug_show_keypoints=debug_show_keypoints,
+                        car_id=car_id,
                     )
-                    if debug_show_keypoints:
-                        _show_grid_debug_frame(
-                            shared_map=shared_map,
-                            current_path=current_path,
-                            target=goal_target,
-                            car_id=car_id,
+                    if allow_weak_pose_replan and not pose_high_conf:
+                        ultra_countdown = max(
+                            int(loop_cfg.weak_pose_replan_countdown),
+                            ultrasonic_to_countdown(latest_ultra_cm),
                         )
-                    ultra_countdown = max(1, ultrasonic_to_countdown(latest_ultra_cm))
+                    else:
+                        ultra_countdown = max(1, ultrasonic_to_countdown(latest_ultra_cm))
                 else:
-                    motor.stop()
-                    time.sleep(max(0.01, loop_cfg.blurry_hold_pause_s))
+                    recovered, last_motion_t = _recover_from_stuck(
+                        motor=motor,
+                        loop_cfg=loop_cfg,
+                        latest_ultra_cm=latest_ultra_cm,
+                        last_motion_t=last_motion_t,
+                    )
+                    if recovered:
+                        current_path = None
+                        ultra_countdown = 0
                     continue
 
             if current_path is None or len(current_path.waypoints) < 2:
                 current_path = None
-                motor.stop()
+                recovered, last_motion_t = _recover_from_stuck(
+                    motor=motor,
+                    loop_cfg=loop_cfg,
+                    latest_ultra_cm=latest_ultra_cm,
+                    last_motion_t=last_motion_t,
+                )
+                if recovered:
+                    ultra_countdown = 0
+                    continue
                 time.sleep(follower.cfg.dt)
                 continue
             
@@ -242,6 +313,7 @@ def drive_to_goal(
             steer_deg = follower.steering_command(current_path, pose_grid, d_goal)
             motor.set_steering(steer_deg)
             motor.forward_for(follower.cfg.dt, speed=int(motor.cfg.speed))
+            last_motion_t = time.time()
 
     finally:
         motor.stop()
@@ -295,7 +367,7 @@ def main() -> None:
         dt=0.12,
         lookahead=14.0,
         wheelbase=2.2,
-        goal_tolerance=3.0,
+        goal_tolerance=1.25,
         pose_frame="grid",
         steer_sign=1.0,
         max_steer_deg=motor.cfg.max_steer_deg,
@@ -303,7 +375,7 @@ def main() -> None:
         steer_deadband_deg=2.0,
         steer_rate_limit_deg_per_tick=12.0,
         dock_distance_grid=12.0,
-        dock_min_lookahead_grid=6.0,
+        dock_min_lookahead_grid=1.5,
     ))
 
     loop_cfg = LoopConfig(
