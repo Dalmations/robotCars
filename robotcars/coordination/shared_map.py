@@ -246,8 +246,11 @@ class SharedMap:
         """
         Insert a front ultrasonic obstacle in world coordinates.
         """
+        if dist_cm is None or not np.isfinite(dist_cm):
+            self.obstacles.pop(obstacle_id, None)
+            return False
 
-        d_cm = float(np.clip(dist_cm, ahead_cm_min, ahead_cm_max))
+        d_cm = float(np.clip(float(dist_cm), ahead_cm_min, ahead_cm_max))
         d_cells = d_cm / max(1e-6, float(cm_per_grid))
 
         ox = float(pose_world.x + d_cells * math.cos(pose_world.theta))
@@ -263,7 +266,7 @@ class SharedMap:
             radius=float(r_world),
             is_moving=False,
         )
-        return
+        return True
 
     def nearest_unobstructed_point(self, target: TargetPoint) -> TargetPoint:
         grid = self.to_occupancy_grid()
