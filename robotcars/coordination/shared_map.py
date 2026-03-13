@@ -80,54 +80,10 @@ class SharedMap:
         if max_points > 0 and len(self.map_points) > max_points:
             self.map_points = self.map_points[-max_points:]
 
-    def merge_slam_update(
-        self,
-        car_id: int,
-        pose: Pose,
-        new_map_points: Optional[object] = None,
-        max_points: int = 5000,
-    ) -> None:
-        self.set_pose(car_id, pose)
-
-        if new_map_points is None:
-            return
-
-        if isinstance(new_map_points, np.ndarray):
-            self.add_map_points(new_map_points, max_points=max_points)
-            return
-
-        self._append_map_points_from_iterable(new_map_points, max_points=max_points)
-
-    def _append_map_points_from_iterable(self, pts: object, *, max_points: int) -> None:
-        for point in pts:  # type: ignore[assignment]
-            x, y, z = point
-            self.map_points.append((float(x), float(y), float(z)))
-
-        if max_points > 0 and len(self.map_points) > max_points:
-            self.map_points = self.map_points[-max_points:]
-
     def reset(self) -> None:
         self.obstacles.clear()
         self.poses.clear()
         self.map_points.clear()
-
-    def merge_observations(self, car_id: int, obs: Observations, pose: Pose) -> None:
-        self.set_pose(car_id, pose)
-        for ob in obs.obstacles:
-            self.obstacles[ob.obstacle_id] = ob
-
-    def snapshot(self) -> "SharedMap":
-        snap = SharedMap()
-        snap.obstacles = dict(self.obstacles)
-        snap.poses = dict(self.poses)
-        snap.map_points = list(self.map_points)
-        snap._static_grid = self._static_grid.copy() if self._static_grid is not None else None
-        snap.grid = GridConfig(
-            size=self.grid.size,
-            resolution=self.grid.resolution,
-            origin_world=self.grid.origin_world,
-        )
-        return snap
 
     # ---------------- World <-> Grid ----------------
 
@@ -222,22 +178,6 @@ class SharedMap:
 
         return grid
 
-    def _explicit_obstacle_at_grid_cell(self, gx: int, gy: int) -> Optional[Obstacle]:
-        for obstacle in self.obstacles.values():
-            ox, oy = self.world_to_grid(obstacle.x, obstacle.y)
-            if ox == gx and oy == gy:
-                return obstacle
-        return None
-
-    def is_path_blocked(self, path: Path) -> bool:
-        grid = self.to_occupancy_grid()
-        for waypoint in path.waypoints:
-            gx = int(round(waypoint.x))
-            gy = int(round(waypoint.y))
-            if 0 <= gx < grid.shape[0] and 0 <= gy < grid.shape[1] and grid[gx, gy] == 1:
-                return True
-        return False
-
     def add_ultra_obstacle(
         self,
         *,
@@ -272,19 +212,6 @@ class SharedMap:
             is_moving=False,
         )
         return True
-
-    def nearest_unobstructed_point(self, target: TargetPoint) -> TargetPoint:
-        grid = self.to_occupancy_grid()
-        tx, ty = int(round(target.x)), int(round(target.y))
-        w, h = grid.shape
-
-        for radius in range(1, 10):
-            for dx in range(-radius, radius + 1):
-                for dy in range(-radius, radius + 1):
-                    x, y = tx + dx, ty + dy
-                    if 0 <= x < w and 0 <= y < h and grid[x, y] == 0:
-                        return TargetPoint(x=float(x), y=float(y))
-        return target
 
     def render_grid_debug_view(
         self,

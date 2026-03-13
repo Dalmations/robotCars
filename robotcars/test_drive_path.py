@@ -17,7 +17,7 @@ from coordination.shared_map import SharedMap
 from car_tools.movement import MovementPlanner, PlanningConfig
 from car_tools.motor_controller import MotorController, MotorConfig
 from car_tools.picarx_path_follower import PathFollower, FollowerConfig
-from car_tools.obstacle_detection import MonocularVSLAM, CameraIntrinsics, VslamConfig
+from car_tools.obstacle_detection import MonocularVSLAM, CameraIntrinsics, VslamConfig, VslamStatus
 from model import TargetPoint, Path
 
 
@@ -98,6 +98,7 @@ def _log_drive_status(
     pose_inliers: int,
     pose_blurry: bool,
     pose_contrast: float,
+    slam_status: VslamStatus,
     prefix: str = "",
 ) -> None:
     ultra_str = "None" if dist_cm is None else f"{round(dist_cm, 1)}cm"
@@ -107,7 +108,14 @@ def _log_drive_status(
         f"goal=({goal_xy_grid[0]},{goal_xy_grid[1]}) d={d_goal:.1f} "
         f"ultra={ultra_str} ultra_countdown={ultra_countdown} "
         f"pose_conf={pose_conf:.2f} inliers={pose_inliers} blurry={pose_blurry} "
-        f"ctr={pose_contrast:.1f}"
+        f"ctr={pose_contrast:.1f} "
+        f"slam_gate={slam_status.gate_reason} feat={slam_status.feature_count} "
+        f"match={slam_status.match_count}/{slam_status.kept_match_count} "
+        f"e_inl={slam_status.essential_inlier_count} pose_inl={slam_status.recover_pose_count} "
+        f"flow={slam_status.median_flow_px:.2f} "
+        f"step={slam_status.requested_step:.2f}->{slam_status.applied_step:.2f} "
+        f"rot={slam_status.rotation_deg:.1f} stat={int(slam_status.stationary)} "
+        f"raw_th={slam_status.raw_pose_theta:.2f} filt_th={slam_status.filtered_pose_theta:.2f}"
     )
 
 
@@ -177,6 +185,7 @@ def drive_to_goal(
                 return True
 
             # Check quality of slam frames
+            slam_status = slam.get_status()
             pose_conf, pose_high_conf, pose_blurry, pose_inliers, pose_contrast = slam.slam_quality(
                 min_confidence=loop_cfg.min_pose_conf_for_replan
             )
@@ -190,6 +199,7 @@ def drive_to_goal(
                 pose_inliers=pose_inliers,
                 pose_blurry=pose_blurry,
                 pose_contrast=pose_contrast,
+                slam_status=slam_status,
                 prefix="hold=pose_recovery ",
                 )
 
