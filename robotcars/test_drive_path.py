@@ -113,8 +113,9 @@ def _log_drive_status(
         f"match={slam_status.match_count}/{slam_status.kept_match_count} "
         f"e_inl={slam_status.essential_inlier_count} pose_inl={slam_status.recover_pose_count} "
         f"flow={slam_status.median_flow_px:.2f} "
+        f"frame_d={slam_status.frame_delta_mean:.2f} cov={slam_status.inlier_coverage:.3f} "
         f"step={slam_status.requested_step:.2f}->{slam_status.applied_step:.2f} "
-        f"rot={slam_status.rotation_deg:.1f} stat={int(slam_status.stationary)} "
+        f"rot={slam_status.rotation_deg:.1f} trans={int(slam_status.translation_enabled)} "
         f"raw_th={slam_status.raw_pose_theta:.2f} filt_th={slam_status.filtered_pose_theta:.2f}"
     )
 

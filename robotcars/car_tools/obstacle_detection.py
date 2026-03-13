@@ -29,40 +29,54 @@ class CameraIntrinsics:
 
 @dataclass
 class VslamConfig:
+    # Feature extraction
+    extractor: Literal["orb", "gftt_orb"] = "orb"
     max_corners: int = 2000
     quality_level: float = 0.01
     min_distance: int = 10
-    orb_nfeatures: int = 2000
+    orb_nfeatures: int = 2500
 
+    # Matching
     ratio_test: float = 0.75
     keep_best: int = 800
 
+    # Geometry
     ransac_prob: float = 0.999
     ransac_thresh: float = 1.0
-    min_inliers: int = 30
+    min_inliers: int = 12          # essential-matrix inliers
+    min_pose_inliers: int = 8      # recoverPose support
     translation_step: float = 1.0
 
+    # Motion gating
+    min_median_flow_px: float = 0.75
+    min_triangulation_flow_px: float = 1.25
+    min_inlier_coverage: float = 0.02
+    stale_frame_delta_mean: float = 0.35
+
+    # Triangulation filters
     min_parallax_w: float = 0.003
     min_depth: float = 0.05
     max_depth: float = 200.0
 
-    min_median_flow_px: float = 1.0
-    min_triangulation_flow_px: float = 1.5
-
+    # Debug
     debug_draw_keypoints: bool = True
     debug_draw_matches: bool = True
     debug_max_match_draw: int = 80
 
+    # Pose frame publishing
     forward_sign: float = 1.0
     pose_ema_alpha: float = 0.2
 
+    # Confidence
     confidence_ema_alpha: float = 0.25
     confidence_good_threshold: float = 0.55
     confidence_min_features: int = 140
-    confidence_min_inliers: int = 45
+    confidence_min_inliers: float = 20.0
     confidence_min_sharpness: float = 45.0
     confidence_min_contrast: float = 25.0
 
+    # Image preprocessing
+    input_color_order: Literal["rgb", "bgr"] = "rgb"
     gray_source: Literal["luma", "green", "y_channel"] = "green"
     gray_flat_field_correction: bool = True
     gray_flat_field_sigma: float = 28.0
@@ -90,16 +104,22 @@ class VslamStatus:
     confidence: float = 0.0
     high_confidence: bool = False
     blurry: bool = True
+
     median_flow_px: float = 0.0
+    frame_delta_mean: float = 0.0
+    inlier_coverage: float = 0.0
     gate_reason: str = "startup"
+
     match_count: int = 0
     kept_match_count: int = 0
     essential_inlier_count: int = 0
     recover_pose_count: int = 0
+
     requested_step: float = 0.0
     applied_step: float = 0.0
-    stationary: bool = False
+    translation_enabled: bool = False
     rotation_deg: float = 0.0
+
     raw_pose_x: float = 0.0
     raw_pose_y: float = 0.0
     raw_pose_theta: float = 0.0
@@ -115,7 +135,11 @@ class _MotionEstimate:
     idx_last: np.ndarray
     R: np.ndarray
     t: np.ndarray
+
     median_flow_px: float = 0.0
+    inlier_coverage: float = 0.0
+    frame_delta_mean: float = 0.0
+
     match_count: int = 0
     kept_match_count: int = 0
     essential_inlier_count: int = 0
@@ -154,12 +178,13 @@ def _triangulate_Xw(
 
 class MonocularVSLAM:
     """
-    Feature-based monocular VO/SLAM front-end.
+    Feature-based monocular VO / SLAM front-end.
 
-    Important behavior:
-    - `recoverPose()` gives translation direction only.
-    - We therefore gate translation by observed image motion before applying `translation_step`.
-    - This prevents the pose from "walking away" while the car is stationary.
+    Key behavior:
+    - Rotation and translation are gated separately.
+    - If turning is observable but translation is weak, we still apply R and zero t.
+    - Translation from recoverPose is unit direction only, so external scale injection
+      (`translation_step`) is still required when translation is allowed. :contentReference[oaicite:1]{index=1}
     """
 
     def __init__(
@@ -181,6 +206,7 @@ class MonocularVSLAM:
         self._pose_filt: Optional[Pose] = None
         self._raw_pose_latest = Pose(0.0, 0.0, 0.0)
         self._status = VslamStatus()
+
         self._clahe: Optional[cv2.CLAHE] = None
         self._gamma_lut: Optional[np.ndarray] = None
         self._gamma_lut_value: float = -1.0
@@ -217,6 +243,8 @@ class MonocularVSLAM:
             high_confidence=bool(s.high_confidence),
             blurry=bool(s.blurry),
             median_flow_px=float(s.median_flow_px),
+            frame_delta_mean=float(s.frame_delta_mean),
+            inlier_coverage=float(s.inlier_coverage),
             gate_reason=str(s.gate_reason),
             match_count=int(s.match_count),
             kept_match_count=int(s.kept_match_count),
@@ -224,7 +252,7 @@ class MonocularVSLAM:
             recover_pose_count=int(s.recover_pose_count),
             requested_step=float(s.requested_step),
             applied_step=float(s.applied_step),
-            stationary=bool(s.stationary),
+            translation_enabled=bool(s.translation_enabled),
             rotation_deg=float(s.rotation_deg),
             raw_pose_x=float(raw_pose.x),
             raw_pose_y=float(raw_pose.y),
@@ -242,8 +270,8 @@ class MonocularVSLAM:
 
     # ---------------- Main update ----------------
 
-    def tick(self, frame_rgb: np.ndarray, translation_step: Optional[float] = None) -> Optional[Pose]:
-        gray, frame_stats = self._to_gray(frame_rgb)
+    def tick(self, frame_rgb_or_bgr: np.ndarray, translation_step: Optional[float] = None) -> Optional[Pose]:
+        gray, frame_stats = self._to_gray(frame_rgb_or_bgr)
         pts_xy, des = self._extract(gray)
         requested_step = float(self.cfg.translation_step if translation_step is None else translation_step)
 
@@ -272,6 +300,8 @@ class MonocularVSLAM:
                 mean_g=frame_stats["mean_g"],
                 mean_b=frame_stats["mean_b"],
                 median_flow_px=0.0,
+                frame_delta_mean=0.0,
+                inlier_coverage=0.0,
                 gate_reason="too_few_features",
                 requested_step=requested_step,
             )
@@ -294,6 +324,8 @@ class MonocularVSLAM:
                 mean_g=frame_stats["mean_g"],
                 mean_b=frame_stats["mean_b"],
                 median_flow_px=0.0,
+                frame_delta_mean=0.0,
+                inlier_coverage=0.0,
                 gate_reason="bootstrap_no_last",
                 requested_step=requested_step,
             )
@@ -301,8 +333,8 @@ class MonocularVSLAM:
             self._annotate_debug_frames()
             return self.shared_map.poses.get(self.car_id)
 
-        motion = self._estimate_motion(last=self._last, cur=cur)
-        if not motion.ok:
+        frame_delta_mean = self._frame_delta_mean(self._last.img_gray, cur.img_gray)
+        if frame_delta_mean < float(self.cfg.stale_frame_delta_mean):
             self._last = cur
             self._dbg_matches_bgr = None
             self._update_status(
@@ -315,6 +347,31 @@ class MonocularVSLAM:
                 mean_g=frame_stats["mean_g"],
                 mean_b=frame_stats["mean_b"],
                 median_flow_px=0.0,
+                frame_delta_mean=frame_delta_mean,
+                inlier_coverage=0.0,
+                gate_reason="stale_frame",
+                requested_step=requested_step,
+            )
+            self._publish_pose()
+            self._annotate_debug_frames()
+            return self.shared_map.poses.get(self.car_id)
+
+        motion = self._estimate_motion(last=self._last, cur=cur, frame_delta_mean=frame_delta_mean)
+        if not motion.ok:
+            self._last = cur
+            self._dbg_matches_bgr = None
+            self._update_status(
+                tracking_ok=False,
+                feature_count=feature_count,
+                inlier_count=0,
+                sharpness=sharpness,
+                contrast=contrast,
+                mean_r=frame_stats["mean_r"],
+                mean_g=frame_stats["mean_g"],
+                mean_b=frame_stats["mean_b"],
+                median_flow_px=motion.median_flow_px,
+                frame_delta_mean=motion.frame_delta_mean,
+                inlier_coverage=motion.inlier_coverage,
                 gate_reason=motion.reason,
                 match_count=motion.match_count,
                 kept_match_count=motion.kept_match_count,
@@ -327,26 +384,67 @@ class MonocularVSLAM:
             self._annotate_debug_frames()
             return self.shared_map.poses.get(self.car_id)
 
-        step = requested_step
-        stationary = motion.median_flow_px < float(self.cfg.min_median_flow_px) or step <= 0.0
+        # Rotation validity is stricter than before: recoverPose support must be healthy.
+        rotation_valid = motion.recover_pose_count >= int(self.cfg.min_pose_inliers)
 
-        if stationary:
-            T_rel = np.eye(4, dtype=np.float64)
-            applied_step = 0.0
-            gate_reason = "stationary_zero_step" if step <= 0.0 else "stationary_low_flow"
-        else:
+        # Translation is a separate decision from rotation.
+        translation_enabled = (
+            rotation_valid
+            and requested_step > 0.0
+            and motion.median_flow_px >= float(self.cfg.min_median_flow_px)
+            and motion.inlier_coverage >= float(self.cfg.min_inlier_coverage)
+        )
+
+        if not rotation_valid:
+            self._last = cur
+            self._dbg_matches_bgr = None
+            self._update_status(
+                tracking_ok=False,
+                feature_count=feature_count,
+                inlier_count=0,
+                sharpness=sharpness,
+                contrast=contrast,
+                mean_r=frame_stats["mean_r"],
+                mean_g=frame_stats["mean_g"],
+                mean_b=frame_stats["mean_b"],
+                median_flow_px=motion.median_flow_px,
+                frame_delta_mean=motion.frame_delta_mean,
+                inlier_coverage=motion.inlier_coverage,
+                gate_reason="too_few_pose_inliers",
+                match_count=motion.match_count,
+                kept_match_count=motion.kept_match_count,
+                essential_inlier_count=motion.essential_inlier_count,
+                recover_pose_count=motion.recover_pose_count,
+                rotation_deg=motion.rotation_deg,
+                requested_step=requested_step,
+            )
+            self._publish_pose()
+            self._annotate_debug_frames()
+            return self.shared_map.poses.get(self.car_id)
+
+        # Always apply rotation if recoverPose support is good.
+        T_rel = np.eye(4, dtype=np.float64)
+        T_rel[:3, :3] = motion.R
+
+        applied_step = 0.0
+        gate_reason = "rotation_only"
+
+        if translation_enabled:
             t = motion.t.reshape(3)
             t_norm = float(np.linalg.norm(t))
             if t_norm > 1e-12:
-                t = (t / t_norm) * step
+                t = (t / t_norm) * requested_step
+                T_rel[:3, 3] = t
+                applied_step = float(np.linalg.norm(t))
+                gate_reason = "tracking_ok"
             else:
-                t = np.zeros(3, dtype=np.float64)
-
-            T_rel = np.eye(4, dtype=np.float64)
-            T_rel[:3, :3] = motion.R
-            T_rel[:3, 3] = t
-            applied_step = float(np.linalg.norm(t))
-            gate_reason = "tracking_ok"
+                gate_reason = "rotation_only_zero_translation"
+        elif requested_step <= 0.0:
+            gate_reason = "rotation_only_zero_step"
+        elif motion.median_flow_px < float(self.cfg.min_median_flow_px):
+            gate_reason = "rotation_only_low_flow"
+        elif motion.inlier_coverage < float(self.cfg.min_inlier_coverage):
+            gate_reason = "rotation_only_low_coverage"
 
         self._Tcw = T_rel @ self._Tcw
         cur.pose_Tcw = self._Tcw.copy()
@@ -356,7 +454,7 @@ class MonocularVSLAM:
         else:
             self._dbg_matches_bgr = None
 
-        if (not stationary) and motion.median_flow_px >= float(self.cfg.min_triangulation_flow_px):
+        if translation_enabled and motion.median_flow_px >= float(self.cfg.min_triangulation_flow_px):
             pts_cur = cur.kps_xy[motion.idx_cur].astype(np.float64)
             pts_last = self._last.kps_xy[motion.idx_last].astype(np.float64)
 
@@ -370,29 +468,33 @@ class MonocularVSLAM:
             Xw_good = Xw[good]
 
             if Xw_good.shape[0] > 0:
+                # nav frame: x=forward(z), y=left(-x), z=up(-y)
                 Xnav = np.column_stack((Xw_good[:, 2], -Xw_good[:, 0], -Xw_good[:, 1])).astype(np.float32)
                 self.shared_map.add_map_points(Xnav)
 
         self._update_status(
             tracking_ok=True,
             feature_count=feature_count,
-            inlier_count=int(motion.idx_cur.shape[0]),
+            inlier_count=int(motion.recover_pose_count),
             sharpness=sharpness,
             contrast=contrast,
             mean_r=frame_stats["mean_r"],
             mean_g=frame_stats["mean_g"],
             mean_b=frame_stats["mean_b"],
             median_flow_px=motion.median_flow_px,
+            frame_delta_mean=motion.frame_delta_mean,
+            inlier_coverage=motion.inlier_coverage,
             gate_reason=gate_reason,
             match_count=motion.match_count,
             kept_match_count=motion.kept_match_count,
-            essential_inlier_count=int(motion.idx_cur.shape[0]),
+            essential_inlier_count=motion.essential_inlier_count,
             recover_pose_count=motion.recover_pose_count,
-            requested_step=step,
+            requested_step=requested_step,
             applied_step=applied_step,
-            stationary=stationary,
+            translation_enabled=translation_enabled,
             rotation_deg=motion.rotation_deg,
         )
+
         self._last = cur
         self._publish_pose()
         self._annotate_debug_frames()
@@ -401,12 +503,6 @@ class MonocularVSLAM:
     # ---------------- Pose publishing ----------------
 
     def _publish_pose(self) -> None:
-        """
-        Convert world->camera pose into a planar nav pose:
-        - x: forward
-        - y: left
-        - theta: heading of the camera forward axis
-        """
         Twc = self._invert_se3(self._Tcw)
         p = Twc[:3, 3]
         Rwc = Twc[:3, :3]
@@ -460,6 +556,8 @@ class MonocularVSLAM:
         mean_g: float,
         mean_b: float,
         median_flow_px: float,
+        frame_delta_mean: float,
+        inlier_coverage: float,
         gate_reason: str = "tracking_ok",
         match_count: int = 0,
         kept_match_count: int = 0,
@@ -467,7 +565,7 @@ class MonocularVSLAM:
         recover_pose_count: int = 0,
         requested_step: float = 0.0,
         applied_step: float = 0.0,
-        stationary: bool = False,
+        translation_enabled: bool = False,
         rotation_deg: float = 0.0,
     ) -> None:
         f_ref = max(1.0, float(self.cfg.confidence_min_features))
@@ -500,6 +598,8 @@ class MonocularVSLAM:
             high_confidence=bool(tracking_ok and conf >= float(self.cfg.confidence_good_threshold)),
             blurry=bool(sharpness < float(self.cfg.confidence_min_sharpness)),
             median_flow_px=float(median_flow_px),
+            frame_delta_mean=float(frame_delta_mean),
+            inlier_coverage=float(inlier_coverage),
             gate_reason=str(gate_reason),
             match_count=int(match_count),
             kept_match_count=int(kept_match_count),
@@ -507,7 +607,7 @@ class MonocularVSLAM:
             recover_pose_count=int(recover_pose_count),
             requested_step=float(requested_step),
             applied_step=float(applied_step),
-            stationary=bool(stationary),
+            translation_enabled=bool(translation_enabled),
             rotation_deg=float(rotation_deg),
         )
 
@@ -527,6 +627,13 @@ class MonocularVSLAM:
             return 0.0
         return float(np.std(gray))
 
+    @staticmethod
+    def _frame_delta_mean(prev_gray: np.ndarray, cur_gray: np.ndarray) -> float:
+        if prev_gray.shape != cur_gray.shape:
+            return float("inf")
+        diff = cv2.absdiff(prev_gray, cur_gray)
+        return float(np.mean(diff))
+
     def _to_gray(self, img: np.ndarray) -> Tuple[np.ndarray, dict]:
         stats = {"mean_r": 0.0, "mean_g": 0.0, "mean_b": 0.0}
 
@@ -538,9 +645,14 @@ class MonocularVSLAM:
                 color = np.clip(color, 0, 255).astype(np.uint8)
             color = np.ascontiguousarray(color)
 
-            r = color[:, :, 0].astype(np.float32)
-            g_ch = color[:, :, 1].astype(np.float32)
-            b = color[:, :, 2].astype(np.float32)
+            if self.cfg.input_color_order == "bgr":
+                b = color[:, :, 0].astype(np.float32)
+                g_ch = color[:, :, 1].astype(np.float32)
+                r = color[:, :, 2].astype(np.float32)
+            else:
+                r = color[:, :, 0].astype(np.float32)
+                g_ch = color[:, :, 1].astype(np.float32)
+                b = color[:, :, 2].astype(np.float32)
 
             stats = {
                 "mean_r": float(r.mean()),
@@ -550,15 +662,25 @@ class MonocularVSLAM:
 
             gray_source = str(self.cfg.gray_source).lower()
             if self.cfg.auto_white_balance and gray_source != "green":
-                color = self._gray_world_balance(color, max_gain=float(self.cfg.max_channel_gain))
+                color = self._gray_world_balance(
+                    color,
+                    order=str(self.cfg.input_color_order).lower(),
+                    max_gain=float(self.cfg.max_channel_gain),
+                )
 
             if gray_source == "green":
                 gray = color[:, :, 1]
             elif gray_source == "y_channel":
-                ycc = cv2.cvtColor(color, cv2.COLOR_RGB2YCrCb)
+                if self.cfg.input_color_order == "bgr":
+                    ycc = cv2.cvtColor(color, cv2.COLOR_BGR2YCrCb)
+                else:
+                    ycc = cv2.cvtColor(color, cv2.COLOR_RGB2YCrCb)
                 gray = ycc[:, :, 0]
             else:
-                gray = cv2.cvtColor(color, cv2.COLOR_RGB2GRAY)
+                if self.cfg.input_color_order == "bgr":
+                    gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
+                else:
+                    gray = cv2.cvtColor(color, cv2.COLOR_RGB2GRAY)
 
         if gray.dtype != np.uint8:
             gray = np.clip(gray, 0, 255).astype(np.uint8)
@@ -627,14 +749,19 @@ class MonocularVSLAM:
         return lut
 
     @staticmethod
-    def _gray_world_balance(img: np.ndarray, *, max_gain: float) -> np.ndarray:
+    def _gray_world_balance(img: np.ndarray, *, order: str, max_gain: float) -> np.ndarray:
         if img.ndim != 3 or img.shape[2] < 3:
             return img
 
         out = img.astype(np.float32)
-        r = out[:, :, 0]
-        g = out[:, :, 1]
-        b = out[:, :, 2]
+        if order == "bgr":
+            b = out[:, :, 0]
+            g = out[:, :, 1]
+            r = out[:, :, 2]
+        else:
+            r = out[:, :, 0]
+            g = out[:, :, 1]
+            b = out[:, :, 2]
 
         mr = float(np.mean(r))
         mg = float(np.mean(g))
@@ -649,33 +776,52 @@ class MonocularVSLAM:
         gr = gain(mr)
         gg = gain(mg)
         gb = gain(mb)
-        out[:, :, 0] *= gr
-        out[:, :, 1] *= gg
-        out[:, :, 2] *= gb
+
+        if order == "bgr":
+            out[:, :, 0] *= gb
+            out[:, :, 1] *= gg
+            out[:, :, 2] *= gr
+        else:
+            out[:, :, 0] *= gr
+            out[:, :, 1] *= gg
+            out[:, :, 2] *= gb
 
         return np.clip(out, 0.0, 255.0).astype(np.uint8)
 
     # ---------------- Feature extraction + motion ----------------
 
     def _extract(self, gray: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        pts = cv2.goodFeaturesToTrack(
-            gray,
-            maxCorners=self.cfg.max_corners,
-            qualityLevel=self.cfg.quality_level,
-            minDistance=self.cfg.min_distance,
-        )
-        if pts is None:
-            return None, None
+        if self.cfg.extractor == "gftt_orb":
+            pts = cv2.goodFeaturesToTrack(
+                gray,
+                maxCorners=self.cfg.max_corners,
+                qualityLevel=self.cfg.quality_level,
+                minDistance=self.cfg.min_distance,
+            )
+            if pts is None:
+                return None, None
 
-        kps = [cv2.KeyPoint(float(p[0][0]), float(p[0][1]), 20.0) for p in pts]
-        kps, des = self.orb.compute(gray, kps)
+            kps = [cv2.KeyPoint(float(p[0][0]), float(p[0][1]), 20.0) for p in pts]
+            kps, des = self.orb.compute(gray, kps)
+            if des is None or kps is None or len(kps) == 0:
+                return None, None
+
+            xy = np.array([kp.pt for kp in kps], dtype=np.float32)
+            return xy, des
+
+        kps, des = self.orb.detectAndCompute(gray, None)
         if des is None or kps is None or len(kps) == 0:
             return None, None
+
+        if len(kps) > self.cfg.max_corners:
+            order = np.argsort([-kp.response for kp in kps])[: self.cfg.max_corners]
+            kps = [kps[i] for i in order]
+            des = des[np.array(order, dtype=np.int64)]
 
         xy = np.array([kp.pt for kp in kps], dtype=np.float32)
         return xy, des
 
-    def _estimate_motion(self, last: _Frame, cur: _Frame) -> _MotionEstimate:
+    def _estimate_motion(self, last: _Frame, cur: _Frame, frame_delta_mean: float) -> _MotionEstimate:
         matches_knn = self.bf.knnMatch(last.des, cur.des, k=2)
 
         idx_last: List[int] = []
@@ -699,7 +845,7 @@ class MonocularVSLAM:
                 np.array([]),
                 np.eye(3),
                 np.zeros((3, 1)),
-                0.0,
+                frame_delta_mean=frame_delta_mean,
                 match_count=match_count,
                 kept_match_count=match_count,
                 reason="too_few_matches",
@@ -711,7 +857,6 @@ class MonocularVSLAM:
             idx_cur = [idx_cur[i] for i in order]
 
         kept_match_count = len(idx_last)
-
         pts_last = last.kps_xy[np.array(idx_last)].astype(np.float64)
         pts_cur = cur.kps_xy[np.array(idx_cur)].astype(np.float64)
 
@@ -730,7 +875,7 @@ class MonocularVSLAM:
                 np.array([]),
                 np.eye(3),
                 np.zeros((3, 1)),
-                0.0,
+                frame_delta_mean=frame_delta_mean,
                 match_count=match_count,
                 kept_match_count=kept_match_count,
                 reason="essential_failed",
@@ -738,14 +883,14 @@ class MonocularVSLAM:
 
         inliers = inliers.reshape(-1).astype(bool)
         essential_inlier_count = int(inliers.sum())
-        if essential_inlier_count < self.cfg.min_inliers:
+        if essential_inlier_count < int(self.cfg.min_inliers):
             return _MotionEstimate(
                 False,
                 np.array([]),
                 np.array([]),
                 np.eye(3),
                 np.zeros((3, 1)),
-                0.0,
+                frame_delta_mean=frame_delta_mean,
                 match_count=match_count,
                 kept_match_count=kept_match_count,
                 essential_inlier_count=essential_inlier_count,
@@ -754,13 +899,31 @@ class MonocularVSLAM:
 
         pts_last_in = pts_last[inliers]
         pts_cur_in = pts_cur[inliers]
+
         recover_pose_count, R, t, _ = cv2.recoverPose(E, pts_last_in, pts_cur_in, self.K)
+        recover_pose_count = int(recover_pose_count)
+
+        if recover_pose_count <= 0:
+            return _MotionEstimate(
+                False,
+                np.array([]),
+                np.array([]),
+                np.eye(3),
+                np.zeros((3, 1)),
+                frame_delta_mean=frame_delta_mean,
+                match_count=match_count,
+                kept_match_count=kept_match_count,
+                essential_inlier_count=essential_inlier_count,
+                recover_pose_count=recover_pose_count,
+                reason="recover_pose_failed",
+            )
 
         idx_last_in = np.array(idx_last, dtype=np.int64)[inliers]
         idx_cur_in = np.array(idx_cur, dtype=np.int64)[inliers]
 
         flow = np.linalg.norm(pts_cur_in - pts_last_in, axis=1)
         median_flow = float(np.median(flow)) if flow.size > 0 else 0.0
+        inlier_coverage = self._point_coverage(pts_cur_in, cur.img_gray.shape)
 
         return _MotionEstimate(
             True,
@@ -768,11 +931,13 @@ class MonocularVSLAM:
             idx_last_in,
             R,
             t,
-            median_flow,
+            median_flow_px=median_flow,
+            inlier_coverage=inlier_coverage,
+            frame_delta_mean=frame_delta_mean,
             match_count=match_count,
             kept_match_count=kept_match_count,
             essential_inlier_count=essential_inlier_count,
-            recover_pose_count=int(recover_pose_count),
+            recover_pose_count=recover_pose_count,
             rotation_deg=self._rotation_angle_deg(R),
             reason="ok",
         )
@@ -811,6 +976,21 @@ class MonocularVSLAM:
         cos_theta = float(np.clip((trace_val - 1.0) * 0.5, -1.0, 1.0))
         return float(math.degrees(math.acos(cos_theta)))
 
+    @staticmethod
+    def _point_coverage(points_xy: np.ndarray, image_shape: Tuple[int, int]) -> float:
+        if points_xy.size == 0:
+            return 0.0
+        h, w = int(image_shape[0]), int(image_shape[1])
+        if h <= 0 or w <= 0:
+            return 0.0
+
+        min_xy = np.min(points_xy, axis=0)
+        max_xy = np.max(points_xy, axis=0)
+
+        box_w = max(1.0, float(max_xy[0] - min_xy[0]))
+        box_h = max(1.0, float(max_xy[1] - min_xy[1]))
+        return float((box_w * box_h) / float(w * h))
+
     def _annotate_debug_frames(self) -> None:
         lines = self._debug_overlay_lines()
         if self._dbg_keypoints_bgr is not None:
@@ -822,8 +1002,9 @@ class MonocularVSLAM:
         s = self.get_status()
         return [
             f"gate={s.gate_reason} track={int(s.tracking_ok)} conf={s.confidence:.2f} blurry={int(s.blurry)}",
-            f"feat={s.feature_count} match={s.match_count}/{s.kept_match_count} inl={s.essential_inlier_count} pose={s.recover_pose_count}",
-            f"flow={s.median_flow_px:.2f} step={s.requested_step:.2f}->{s.applied_step:.2f} rot={s.rotation_deg:.1f} stat={int(s.stationary)}",
+            f"feat={s.feature_count} match={s.match_count}/{s.kept_match_count} e_inl={s.essential_inlier_count} pose_inl={s.recover_pose_count}",
+            f"flow={s.median_flow_px:.2f} frame_d={s.frame_delta_mean:.2f} cov={s.inlier_coverage:.3f} rot={s.rotation_deg:.1f}",
+            f"step={s.requested_step:.2f}->{s.applied_step:.2f} trans={int(s.translation_enabled)}",
             f"raw=({s.raw_pose_x:.2f},{s.raw_pose_y:.2f},{s.raw_pose_theta:.2f}) filt=({s.filtered_pose_x:.2f},{s.filtered_pose_y:.2f},{s.filtered_pose_theta:.2f})",
         ]
 
@@ -876,15 +1057,5 @@ class MonocularVSLAM:
             matches,
             None,
             flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
-        )
-        cv2.putText(
-            vis,
-            f"inliers: {len(matches)} flow_med_px: {self._status.median_flow_px:.2f}",
-            (10, 20),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
         )
         return vis
