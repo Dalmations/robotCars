@@ -233,7 +233,6 @@ def main() -> None:
         shared_map,
         car_id=0,
         cfg=VslamConfig(
-            input_color_order=cam.color_order,
             debug_draw_keypoints=True,
             debug_draw_matches=True,
             translation_step=0.2,
