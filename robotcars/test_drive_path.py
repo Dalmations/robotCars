@@ -294,7 +294,7 @@ def main() -> None:
                 slam.tick(frame, translation_step=0.0)
             time.sleep(0.02)
 
-        square = [(20, 20), (5, 20), (5, 5), (20, 5), (20, 20)]
+        square = [(10, 10), (5, 10), (5, 5), (10, 5), (10, 10)]
         print("Drive square:", square)
         for goal in square[1:]:
             ok = drive_to_goal(
