@@ -44,7 +44,8 @@ class VslamConfig:
     ransac_prob: float = 0.999
     ransac_thresh: float = 1.0
     min_inliers: int = 12          # essential-matrix inliers
-    min_pose_inliers: int = 8      # recoverPose support
+    min_pose_inliers: int = 10     # recoverPose support
+    max_rotation_deg: float = 45.0
     translation_step: float = 1.0
 
     # Motion gating
@@ -305,7 +306,7 @@ class MonocularVSLAM:
                 gate_reason="too_few_features",
                 requested_step=requested_step,
             )
-            self._publish_pose()
+            self._publish_pose(update_filter=False)
             self._annotate_debug_frames()
             return self.shared_map.poses.get(self.car_id)
 
@@ -329,7 +330,7 @@ class MonocularVSLAM:
                 gate_reason="bootstrap_no_last",
                 requested_step=requested_step,
             )
-            self._publish_pose()
+            self._publish_pose(update_filter=False)
             self._annotate_debug_frames()
             return self.shared_map.poses.get(self.car_id)
 
@@ -352,7 +353,7 @@ class MonocularVSLAM:
                 gate_reason="stale_frame",
                 requested_step=requested_step,
             )
-            self._publish_pose()
+            self._publish_pose(update_filter=False)
             self._annotate_debug_frames()
             return self.shared_map.poses.get(self.car_id)
 
@@ -380,7 +381,7 @@ class MonocularVSLAM:
                 rotation_deg=motion.rotation_deg,
                 requested_step=requested_step,
             )
-            self._publish_pose()
+            self._publish_pose(update_filter=False)
             self._annotate_debug_frames()
             return self.shared_map.poses.get(self.car_id)
 
@@ -418,7 +419,7 @@ class MonocularVSLAM:
                 rotation_deg=motion.rotation_deg,
                 requested_step=requested_step,
             )
-            self._publish_pose()
+            self._publish_pose(update_filter=False)
             self._annotate_debug_frames()
             return self.shared_map.poses.get(self.car_id)
 
@@ -502,7 +503,7 @@ class MonocularVSLAM:
 
     # ---------------- Pose publishing ----------------
 
-    def _publish_pose(self) -> None:
+    def _publish_pose(self, *, update_filter: bool = True) -> None:
         Twc = self._invert_se3(self._Tcw)
         p = Twc[:3, 3]
         Rwc = Twc[:3, :3]
@@ -516,20 +517,21 @@ class MonocularVSLAM:
         raw_pose = Pose(x=x_raw, y=y_raw, theta=theta_raw)
         self._raw_pose_latest = raw_pose
 
-        alpha = float(self.cfg.pose_ema_alpha)
-        if alpha <= 0.0 or self._pose_filt is None:
-            self._pose_filt = raw_pose
-        else:
-            xf = (1.0 - alpha) * self._pose_filt.x + alpha * raw_pose.x
-            yf = (1.0 - alpha) * self._pose_filt.y + alpha * raw_pose.y
+        if update_filter or self._pose_filt is None:
+            alpha = float(self.cfg.pose_ema_alpha)
+            if alpha <= 0.0 or self._pose_filt is None:
+                self._pose_filt = raw_pose
+            else:
+                xf = (1.0 - alpha) * self._pose_filt.x + alpha * raw_pose.x
+                yf = (1.0 - alpha) * self._pose_filt.y + alpha * raw_pose.y
 
-            c0, s0 = math.cos(self._pose_filt.theta), math.sin(self._pose_filt.theta)
-            c1, s1 = math.cos(raw_pose.theta), math.sin(raw_pose.theta)
-            cf = (1.0 - alpha) * c0 + alpha * c1
-            sf = (1.0 - alpha) * s0 + alpha * s1
-            thf = math.atan2(sf, cf)
+                c0, s0 = math.cos(self._pose_filt.theta), math.sin(self._pose_filt.theta)
+                c1, s1 = math.cos(raw_pose.theta), math.sin(raw_pose.theta)
+                cf = (1.0 - alpha) * c0 + alpha * c1
+                sf = (1.0 - alpha) * s0 + alpha * s1
+                thf = math.atan2(sf, cf)
 
-            self._pose_filt = Pose(x=float(xf), y=float(yf), theta=float(thf))
+                self._pose_filt = Pose(x=float(xf), y=float(yf), theta=float(thf))
 
         self.shared_map.set_pose(self.car_id, self._pose_filt)
 
@@ -900,10 +902,10 @@ class MonocularVSLAM:
         pts_last_in = pts_last[inliers]
         pts_cur_in = pts_cur[inliers]
 
-        recover_pose_count, R, t, _ = cv2.recoverPose(E, pts_last_in, pts_cur_in, self.K)
+        recover_pose_count, R, t, pose_mask = cv2.recoverPose(E, pts_last_in, pts_cur_in, self.K)
         recover_pose_count = int(recover_pose_count)
 
-        if recover_pose_count <= 0:
+        if recover_pose_count <= 0 or pose_mask is None:
             return _MotionEstimate(
                 False,
                 np.array([]),
@@ -918,12 +920,49 @@ class MonocularVSLAM:
                 reason="recover_pose_failed",
             )
 
-        idx_last_in = np.array(idx_last, dtype=np.int64)[inliers]
-        idx_cur_in = np.array(idx_cur, dtype=np.int64)[inliers]
+        pose_mask = pose_mask.reshape(-1).astype(bool)
+        if int(pose_mask.sum()) <= 0:
+            return _MotionEstimate(
+                False,
+                np.array([]),
+                np.array([]),
+                np.eye(3),
+                np.zeros((3, 1)),
+                frame_delta_mean=frame_delta_mean,
+                match_count=match_count,
+                kept_match_count=kept_match_count,
+                essential_inlier_count=essential_inlier_count,
+                recover_pose_count=recover_pose_count,
+                reason="recover_pose_failed",
+            )
 
-        flow = np.linalg.norm(pts_cur_in - pts_last_in, axis=1)
+        idx_last_in = np.array(idx_last, dtype=np.int64)[inliers][pose_mask]
+        idx_cur_in = np.array(idx_cur, dtype=np.int64)[inliers][pose_mask]
+        pts_last_pose = pts_last_in[pose_mask]
+        pts_cur_pose = pts_cur_in[pose_mask]
+
+        flow = np.linalg.norm(pts_cur_pose - pts_last_pose, axis=1)
         median_flow = float(np.median(flow)) if flow.size > 0 else 0.0
-        inlier_coverage = self._point_coverage(pts_cur_in, cur.img_gray.shape)
+        inlier_coverage = self._point_coverage(pts_cur_pose, cur.img_gray.shape)
+        rotation_deg = self._rotation_angle_deg(R)
+
+        if rotation_deg > float(self.cfg.max_rotation_deg):
+            return _MotionEstimate(
+                False,
+                np.array([]),
+                np.array([]),
+                np.eye(3),
+                np.zeros((3, 1)),
+                median_flow_px=median_flow,
+                inlier_coverage=inlier_coverage,
+                frame_delta_mean=frame_delta_mean,
+                match_count=match_count,
+                kept_match_count=kept_match_count,
+                essential_inlier_count=essential_inlier_count,
+                recover_pose_count=recover_pose_count,
+                rotation_deg=rotation_deg,
+                reason="rotation_too_large",
+            )
 
         return _MotionEstimate(
             True,
@@ -938,7 +977,7 @@ class MonocularVSLAM:
             kept_match_count=kept_match_count,
             essential_inlier_count=essential_inlier_count,
             recover_pose_count=recover_pose_count,
-            rotation_deg=self._rotation_angle_deg(R),
+            rotation_deg=rotation_deg,
             reason="ok",
         )
 

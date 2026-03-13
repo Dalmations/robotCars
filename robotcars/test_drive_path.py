@@ -285,7 +285,7 @@ def main() -> None:
         step_seconds=0.40,
         brake_between_steps=False,
         steering_slew_deg_per_s=90.0,
-        steer_sign=1.0,
+        steer_sign=-1.0,
         steer_offset_deg=0.0,
         max_steer_deg=35.0,
         settle_seconds=0.01,
