@@ -45,6 +45,7 @@ class MotorController:
         # for slew limiting
         self._last_servo_cmd_deg: float = 0.0
         self._last_servo_time: float = time.time()
+        self._applied_steer_deg: float = 0.0
 
         # Make sure we start stopped
         self.stop()
@@ -78,6 +79,7 @@ class MotorController:
             self._last_servo_time = time.time()
 
         self.px.set_dir_servo_angle(cmd)
+        self._applied_steer_deg = float(cmd)
         if self.cfg.settle_seconds > 0:
             time.sleep(self.cfg.settle_seconds)
 
@@ -117,3 +119,6 @@ class MotorController:
 
     def at_target(self) -> bool:
         return self._reached_target
+
+    def get_applied_steering_deg(self) -> float:
+        return float(self._applied_steer_deg)

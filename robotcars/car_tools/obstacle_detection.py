@@ -53,6 +53,7 @@ class VslamConfig:
     min_triangulation_flow_px: float = 1.25
     min_inlier_coverage: float = 0.02
     stale_frame_delta_mean: float = 0.35
+    max_weak_hold_frames: int = 3
 
     # Triangulation filters
     min_parallax_w: float = 0.003
@@ -179,13 +180,12 @@ def _triangulate_Xw(
 
 class MonocularVSLAM:
     """
-    Feature-based monocular VO / SLAM front-end.
+    Feature-based monocular VO front-end with simple planar odometry fusion.
 
     Key behavior:
-    - Rotation and translation are gated separately.
-    - If turning is observable but translation is weak, we still apply R and zero t.
-    - Translation from recoverPose is unit direction only, so external scale injection
-      (`translation_step`) is still required when translation is allowed. :contentReference[oaicite:1]{index=1}
+    - When recoverPose support is healthy, visual odometry supplies yaw.
+    - Translation magnitude comes from the externally provided step estimate.
+    - Brief weak-frame gaps can keep propagating pose from odometry.
     """
 
     def __init__(
@@ -213,6 +213,7 @@ class MonocularVSLAM:
         self._gamma_lut_value: float = -1.0
 
         self._Tcw = np.eye(4, dtype=np.float64)
+        self._weak_hold_count: int = 0
 
         self._dbg_keypoints_bgr: Optional[np.ndarray] = None
         self._dbg_matches_bgr: Optional[np.ndarray] = None
@@ -271,10 +272,16 @@ class MonocularVSLAM:
 
     # ---------------- Main update ----------------
 
-    def tick(self, frame_rgb_or_bgr: np.ndarray, translation_step: Optional[float] = None) -> Optional[Pose]:
+    def tick(
+        self,
+        frame_rgb_or_bgr: np.ndarray,
+        translation_step: Optional[float] = None,
+        odom_yaw_delta: Optional[float] = None,
+    ) -> Optional[Pose]:
         gray, frame_stats = self._to_gray(frame_rgb_or_bgr)
         pts_xy, des = self._extract(gray)
         requested_step = float(self.cfg.translation_step if translation_step is None else translation_step)
+        odom_yaw_delta = 0.0 if odom_yaw_delta is None else float(odom_yaw_delta)
 
         sharpness = self._frame_sharpness(gray)
         contrast = self._frame_contrast(gray)
@@ -290,25 +297,16 @@ class MonocularVSLAM:
             self._dbg_keypoints_bgr = None
 
         if pts_xy is None or des is None or len(pts_xy) < 50:
-            self._dbg_matches_bgr = None
-            self._update_status(
-                tracking_ok=False,
+            return self._handle_weak_frame(
+                cur=None,
+                tracking_reason="too_few_features",
                 feature_count=feature_count,
-                inlier_count=0,
                 sharpness=sharpness,
                 contrast=contrast,
-                mean_r=frame_stats["mean_r"],
-                mean_g=frame_stats["mean_g"],
-                mean_b=frame_stats["mean_b"],
-                median_flow_px=0.0,
-                frame_delta_mean=0.0,
-                inlier_coverage=0.0,
-                gate_reason="too_few_features",
+                frame_stats=frame_stats,
                 requested_step=requested_step,
+                odom_yaw_delta=odom_yaw_delta,
             )
-            self._publish_pose(update_filter=False)
-            self._annotate_debug_frames()
-            return self.shared_map.poses.get(self.car_id)
 
         cur = _Frame(gray, pts_xy, des, self._Tcw.copy())
 
@@ -336,118 +334,73 @@ class MonocularVSLAM:
 
         frame_delta_mean = self._frame_delta_mean(self._last.img_gray, cur.img_gray)
         if frame_delta_mean < float(self.cfg.stale_frame_delta_mean):
-            self._last = cur
-            self._dbg_matches_bgr = None
-            self._update_status(
-                tracking_ok=False,
+            return self._handle_weak_frame(
+                cur=cur,
+                tracking_reason="stale_frame",
                 feature_count=feature_count,
-                inlier_count=0,
                 sharpness=sharpness,
                 contrast=contrast,
-                mean_r=frame_stats["mean_r"],
-                mean_g=frame_stats["mean_g"],
-                mean_b=frame_stats["mean_b"],
-                median_flow_px=0.0,
-                frame_delta_mean=frame_delta_mean,
-                inlier_coverage=0.0,
-                gate_reason="stale_frame",
+                frame_stats=frame_stats,
                 requested_step=requested_step,
+                odom_yaw_delta=odom_yaw_delta,
+                frame_delta_mean=frame_delta_mean,
             )
-            self._publish_pose(update_filter=False)
-            self._annotate_debug_frames()
-            return self.shared_map.poses.get(self.car_id)
 
         motion = self._estimate_motion(last=self._last, cur=cur, frame_delta_mean=frame_delta_mean)
         if not motion.ok:
-            self._last = cur
-            self._dbg_matches_bgr = None
-            self._update_status(
-                tracking_ok=False,
+            return self._handle_weak_frame(
+                cur=cur,
+                tracking_reason=motion.reason,
                 feature_count=feature_count,
-                inlier_count=0,
                 sharpness=sharpness,
                 contrast=contrast,
-                mean_r=frame_stats["mean_r"],
-                mean_g=frame_stats["mean_g"],
-                mean_b=frame_stats["mean_b"],
+                frame_stats=frame_stats,
+                requested_step=requested_step,
+                odom_yaw_delta=odom_yaw_delta,
                 median_flow_px=motion.median_flow_px,
                 frame_delta_mean=motion.frame_delta_mean,
                 inlier_coverage=motion.inlier_coverage,
-                gate_reason=motion.reason,
                 match_count=motion.match_count,
                 kept_match_count=motion.kept_match_count,
                 essential_inlier_count=motion.essential_inlier_count,
                 recover_pose_count=motion.recover_pose_count,
                 rotation_deg=motion.rotation_deg,
-                requested_step=requested_step,
             )
-            self._publish_pose(update_filter=False)
-            self._annotate_debug_frames()
-            return self.shared_map.poses.get(self.car_id)
 
         # Rotation validity is stricter than before: recoverPose support must be healthy.
         rotation_valid = motion.recover_pose_count >= int(self.cfg.min_pose_inliers)
 
         # Translation is a separate decision from rotation.
-        translation_enabled = (
-            rotation_valid
-            and requested_step > 0.0
-            and motion.median_flow_px >= float(self.cfg.min_median_flow_px)
-            and motion.inlier_coverage >= float(self.cfg.min_inlier_coverage)
-        )
+        translation_enabled = rotation_valid and abs(float(requested_step)) > 1e-9
 
         if not rotation_valid:
-            self._last = cur
-            self._dbg_matches_bgr = None
-            self._update_status(
-                tracking_ok=False,
+            return self._handle_weak_frame(
+                cur=cur,
+                tracking_reason="too_few_pose_inliers",
                 feature_count=feature_count,
-                inlier_count=0,
                 sharpness=sharpness,
                 contrast=contrast,
-                mean_r=frame_stats["mean_r"],
-                mean_g=frame_stats["mean_g"],
-                mean_b=frame_stats["mean_b"],
+                frame_stats=frame_stats,
+                requested_step=requested_step,
+                odom_yaw_delta=odom_yaw_delta,
                 median_flow_px=motion.median_flow_px,
                 frame_delta_mean=motion.frame_delta_mean,
                 inlier_coverage=motion.inlier_coverage,
-                gate_reason="too_few_pose_inliers",
                 match_count=motion.match_count,
                 kept_match_count=motion.kept_match_count,
                 essential_inlier_count=motion.essential_inlier_count,
                 recover_pose_count=motion.recover_pose_count,
                 rotation_deg=motion.rotation_deg,
-                requested_step=requested_step,
             )
-            self._publish_pose(update_filter=False)
-            self._annotate_debug_frames()
-            return self.shared_map.poses.get(self.car_id)
-
-        # Always apply rotation if recoverPose support is good.
-        T_rel = np.eye(4, dtype=np.float64)
-        T_rel[:3, :3] = motion.R
 
         applied_step = 0.0
         gate_reason = "rotation_only"
 
-        if translation_enabled:
-            t = motion.t.reshape(3)
-            t_norm = float(np.linalg.norm(t))
-            if t_norm > 1e-12:
-                t = (t / t_norm) * requested_step
-                T_rel[:3, 3] = t
-                applied_step = float(np.linalg.norm(t))
-                gate_reason = "tracking_ok"
-            else:
-                gate_reason = "rotation_only_zero_translation"
-        elif requested_step <= 0.0:
-            gate_reason = "rotation_only_zero_step"
-        elif motion.median_flow_px < float(self.cfg.min_median_flow_px):
-            gate_reason = "rotation_only_low_flow"
-        elif motion.inlier_coverage < float(self.cfg.min_inlier_coverage):
-            gate_reason = "rotation_only_low_coverage"
-
-        self._Tcw = T_rel @ self._Tcw
+        self._weak_hold_count = 0
+        vo_yaw_delta = self._yaw_delta_from_relative_rotation(motion.R)
+        self._apply_planar_motion(forward_step=requested_step, yaw_delta=vo_yaw_delta)
+        applied_step = abs(float(requested_step))
+        gate_reason = "tracking_ok" if translation_enabled else "rotation_only_zero_step"
         cur.pose_Tcw = self._Tcw.copy()
 
         if self.cfg.debug_draw_matches:
@@ -504,17 +457,7 @@ class MonocularVSLAM:
     # ---------------- Pose publishing ----------------
 
     def _publish_pose(self, *, update_filter: bool = True) -> None:
-        Twc = self._invert_se3(self._Tcw)
-        p = Twc[:3, 3]
-        Rwc = Twc[:3, :3]
-
-        s = float(self.cfg.forward_sign)
-        x_raw = float(s * p[2])
-        y_raw = float(s * (-p[0]))
-
-        fwd = Rwc[:, 2]
-        theta_raw = float(math.atan2(-s * fwd[0], s * fwd[2])) if (abs(fwd[0]) + abs(fwd[2]) > 1e-9) else 0.0
-        raw_pose = Pose(x=x_raw, y=y_raw, theta=theta_raw)
+        raw_pose = self._planar_pose_from_Tcw(self._Tcw)
         self._raw_pose_latest = raw_pose
 
         if update_filter or self._pose_filt is None:
@@ -535,6 +478,52 @@ class MonocularVSLAM:
 
         self.shared_map.set_pose(self.car_id, self._pose_filt)
 
+    def _apply_planar_motion(self, *, forward_step: float, yaw_delta: float) -> None:
+        pose = self._planar_pose_from_Tcw(self._Tcw)
+        step = float(forward_step)
+        dtheta = float(yaw_delta)
+
+        theta_mid = pose.theta + 0.5 * dtheta
+        x_new = pose.x + step * math.cos(theta_mid)
+        y_new = pose.y + step * math.sin(theta_mid)
+        theta_new = self._wrap_angle(pose.theta + dtheta)
+
+        self._Tcw = self._planar_pose_to_Tcw(Pose(x=float(x_new), y=float(y_new), theta=float(theta_new)))
+
+    def _planar_pose_from_Tcw(self, Tcw: np.ndarray) -> Pose:
+        Twc = self._invert_se3(Tcw)
+        p = Twc[:3, 3]
+        Rwc = Twc[:3, :3]
+
+        s = float(self.cfg.forward_sign)
+        x_raw = float(s * p[2])
+        y_raw = float(s * (-p[0]))
+
+        fwd = Rwc[:, 2]
+        theta_raw = float(math.atan2(-s * fwd[0], s * fwd[2])) if (abs(fwd[0]) + abs(fwd[2]) > 1e-9) else 0.0
+        return Pose(x=x_raw, y=y_raw, theta=theta_raw)
+
+    @staticmethod
+    def _planar_pose_to_Twc(pose: Pose) -> np.ndarray:
+        theta = float(pose.theta)
+        c = float(math.cos(theta))
+        s = float(math.sin(theta))
+
+        Twc = np.eye(4, dtype=np.float64)
+        Twc[:3, :3] = np.array(
+            [
+                [c, 0.0, -s],
+                [0.0, 1.0, 0.0],
+                [s, 0.0, c],
+            ],
+            dtype=np.float64,
+        )
+        Twc[:3, 3] = np.array([-float(pose.y), 0.0, float(pose.x)], dtype=np.float64)
+        return Twc
+
+    def _planar_pose_to_Tcw(self, pose: Pose) -> np.ndarray:
+        return self._invert_se3(self._planar_pose_to_Twc(pose))
+
     @staticmethod
     def _invert_se3(T: np.ndarray) -> np.ndarray:
         R = T[:3, :3]
@@ -543,6 +532,14 @@ class MonocularVSLAM:
         Tinv[:3, :3] = R.T
         Tinv[:3, 3] = -R.T @ t
         return Tinv
+
+    @staticmethod
+    def _wrap_angle(a: float) -> float:
+        while a > math.pi:
+            a -= 2.0 * math.pi
+        while a < -math.pi:
+            a += 2.0 * math.pi
+        return a
 
     # ---------------- Status ----------------
 
@@ -612,6 +609,73 @@ class MonocularVSLAM:
             translation_enabled=bool(translation_enabled),
             rotation_deg=float(rotation_deg),
         )
+
+    def _handle_weak_frame(
+        self,
+        *,
+        cur: Optional[_Frame],
+        tracking_reason: str,
+        feature_count: int,
+        sharpness: float,
+        contrast: float,
+        frame_stats: dict,
+        requested_step: float,
+        odom_yaw_delta: float = 0.0,
+        median_flow_px: float = 0.0,
+        frame_delta_mean: float = 0.0,
+        inlier_coverage: float = 0.0,
+        match_count: int = 0,
+        kept_match_count: int = 0,
+        essential_inlier_count: int = 0,
+        recover_pose_count: int = 0,
+        rotation_deg: float = 0.0,
+    ) -> Optional[Pose]:
+        hold_limit = max(0, int(self.cfg.max_weak_hold_frames))
+        hold_tracking = bool(self._status.tracking_ok) and self._weak_hold_count < hold_limit
+        odom_step = float(requested_step)
+        odom_motion = abs(odom_step) > 1e-9 or abs(float(odom_yaw_delta)) > 1e-9
+
+        if hold_tracking:
+            self._weak_hold_count += 1
+            tracking_ok = True
+            if odom_motion:
+                self._apply_planar_motion(forward_step=odom_step, yaw_delta=float(odom_yaw_delta))
+                gate_reason = f"odom_hold_{tracking_reason}"
+            else:
+                gate_reason = f"hold_{tracking_reason}"
+        else:
+            self._weak_hold_count = 0
+            tracking_ok = False
+            gate_reason = tracking_reason
+            if cur is not None:
+                self._last = cur
+
+        self._dbg_matches_bgr = None
+        self._update_status(
+            tracking_ok=tracking_ok,
+            feature_count=feature_count,
+            inlier_count=int(max(essential_inlier_count, recover_pose_count)),
+            sharpness=sharpness,
+            contrast=contrast,
+            mean_r=frame_stats["mean_r"],
+            mean_g=frame_stats["mean_g"],
+            mean_b=frame_stats["mean_b"],
+            median_flow_px=median_flow_px,
+            frame_delta_mean=frame_delta_mean,
+            inlier_coverage=inlier_coverage,
+            gate_reason=gate_reason,
+            match_count=match_count,
+            kept_match_count=kept_match_count,
+            essential_inlier_count=essential_inlier_count,
+            recover_pose_count=recover_pose_count,
+            requested_step=requested_step,
+            applied_step=abs(odom_step) if hold_tracking and odom_motion else 0.0,
+            translation_enabled=bool(hold_tracking and abs(odom_step) > 1e-9),
+            rotation_deg=rotation_deg,
+        )
+        self._publish_pose(update_filter=False)
+        self._annotate_debug_frames()
+        return self.shared_map.poses.get(self.car_id)
 
     # ---------------- Image preprocessing ----------------
 
@@ -902,7 +966,22 @@ class MonocularVSLAM:
         pts_last_in = pts_last[inliers]
         pts_cur_in = pts_cur[inliers]
 
-        recover_pose_count, R, t, pose_mask = cv2.recoverPose(E, pts_last_in, pts_cur_in, self.K)
+        pose_solution = self._recover_pose_from_essential(E, pts_last_in, pts_cur_in)
+        if pose_solution is None:
+            return _MotionEstimate(
+                False,
+                np.array([]),
+                np.array([]),
+                np.eye(3),
+                np.zeros((3, 1)),
+                frame_delta_mean=frame_delta_mean,
+                match_count=match_count,
+                kept_match_count=kept_match_count,
+                essential_inlier_count=essential_inlier_count,
+                reason="recover_pose_failed",
+            )
+
+        recover_pose_count, R, t, pose_mask = pose_solution
         recover_pose_count = int(recover_pose_count)
 
         if recover_pose_count <= 0 or pose_mask is None:
@@ -981,6 +1060,52 @@ class MonocularVSLAM:
             reason="ok",
         )
 
+    def _recover_pose_from_essential(
+        self,
+        E: np.ndarray,
+        pts_last_in: np.ndarray,
+        pts_cur_in: np.ndarray,
+    ) -> Optional[Tuple[int, np.ndarray, np.ndarray, np.ndarray]]:
+        best_solution: Optional[Tuple[int, np.ndarray, np.ndarray, np.ndarray]] = None
+        best_score: Optional[Tuple[int, int]] = None
+
+        for candidate in self._essential_candidates(E):
+            try:
+                pose_count, R, t, pose_mask = cv2.recoverPose(candidate, pts_last_in, pts_cur_in, self.K)
+            except cv2.error:
+                continue
+
+            if pose_mask is None:
+                continue
+
+            pose_count = int(pose_count)
+            pose_support = int(pose_mask.reshape(-1).astype(bool).sum())
+            score = (pose_support, pose_count)
+            if best_score is None or score > best_score:
+                best_score = score
+                best_solution = (pose_count, R, t, pose_mask)
+
+        return best_solution
+
+    @staticmethod
+    def _essential_candidates(E: np.ndarray) -> List[np.ndarray]:
+        E = np.asarray(E, dtype=np.float64)
+        if E.size == 9:
+            return [E.reshape(3, 3)]
+
+        candidates: List[np.ndarray] = []
+        if E.ndim != 2:
+            return candidates
+
+        if E.shape[1] == 3 and E.shape[0] % 3 == 0:
+            for row in range(0, E.shape[0], 3):
+                candidates.append(E[row:row + 3, :])
+        elif E.shape[0] == 3 and E.shape[1] % 3 == 0:
+            for col in range(0, E.shape[1], 3):
+                candidates.append(E[:, col:col + 3])
+
+        return [candidate for candidate in candidates if candidate.shape == (3, 3)]
+
     # ---------------- Triangulation filters ----------------
 
     def _parallax_norm(self, pts1_px: np.ndarray, pts2_px: np.ndarray) -> np.ndarray:
@@ -1014,6 +1139,10 @@ class MonocularVSLAM:
         trace_val = float(np.trace(R))
         cos_theta = float(np.clip((trace_val - 1.0) * 0.5, -1.0, 1.0))
         return float(math.degrees(math.acos(cos_theta)))
+
+    @staticmethod
+    def _yaw_delta_from_relative_rotation(R: np.ndarray) -> float:
+        return float(math.atan2(float(R[0, 2] - R[2, 0]), float(R[0, 0] + R[2, 2])))
 
     @staticmethod
     def _point_coverage(points_xy: np.ndarray, image_shape: Tuple[int, int]) -> float:

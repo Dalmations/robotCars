@@ -37,8 +37,33 @@ class LoopConfig:
     stuck_reverse_speed_scale: float = 0.6
 
 
+@dataclass
+class PendingOdom:
+    step_cells: float = 0.0
+    yaw_delta: float = 0.0
+    steer_deg: float = 0.0
+
+
+def _estimate_translation_step_cells_for_duration(
+    duration_s: float,
+    motor: MotorController,
+    *,
+    speed: Optional[int] = None,
+) -> float:
+    base_step = float(duration_s) / float(max(1e-6, motor.cfg.step_seconds))
+    speed_ref = max(1.0, float(motor.cfg.speed))
+    speed_cmd = float(motor.cfg.speed if speed is None else max(0, min(100, int(speed))))
+    return base_step * (speed_cmd / speed_ref)
+
+
 def _estimate_translation_step_cells(follower: PathFollower, motor: MotorController) -> float:
-    return float(follower.cfg.dt) / float(max(1e-6, motor.cfg.step_seconds))
+    return _estimate_translation_step_cells_for_duration(follower.cfg.dt, motor, speed=int(motor.cfg.speed))
+
+
+def _estimate_ackermann_yaw_delta(step_cells: float, steer_deg: float, follower: PathFollower) -> float:
+    wheelbase = max(1e-6, float(follower.cfg.wheelbase))
+    steer_rad = math.radians(float(steer_deg))
+    return float(step_cells) * math.tan(steer_rad) / wheelbase
 
 
 def _tick_ultrasonic(
@@ -148,6 +173,9 @@ def _log_drive_status(
     pose_blurry: bool,
     pose_contrast: float,
     slam_status: VslamStatus,
+    odom_step_cells: float,
+    odom_yaw_deg: float,
+    odom_steer_deg: float,
     prefix: str = "",
 ) -> None:
     ultra_str = "None" if dist_cm is None else f"{round(dist_cm, 1)}cm"
@@ -158,6 +186,7 @@ def _log_drive_status(
         f"ultra={ultra_str} ultra_countdown={ultra_countdown} "
         f"pose_conf={pose_conf:.2f} inliers={pose_inliers} blurry={pose_blurry} "
         f"ctr={pose_contrast:.1f} "
+        f"odom_step={odom_step_cells:.2f} odom_yaw={odom_yaw_deg:.1f} steer={odom_steer_deg:.1f} "
         f"slam_gate={slam_status.gate_reason} feat={slam_status.feature_count} "
         f"match={slam_status.match_count}/{slam_status.kept_match_count} "
         f"e_inl={slam_status.essential_inlier_count} pose_inl={slam_status.recover_pose_count} "
@@ -193,6 +222,7 @@ def drive_to_goal(
     last_ultra_tick_t = 0.0
     t0 = time.time()
     last_motion_t = t0
+    pending_odom = PendingOdom()
 
     follower.reset()
 
@@ -217,7 +247,13 @@ def drive_to_goal(
                 time.sleep(0.05)
                 continue
 
-            slam.tick(frame, translation_step=_estimate_translation_step_cells(follower, motor))
+            odom_used = pending_odom
+            pending_odom = PendingOdom()
+            slam.tick(
+                frame,
+                translation_step=odom_used.step_cells,
+                odom_yaw_delta=odom_used.yaw_delta,
+            )
 
             if debug_show_keypoints:
                 _show_slam_debug_frame(slam)
@@ -251,6 +287,9 @@ def drive_to_goal(
                 pose_blurry=pose_blurry,
                 pose_contrast=pose_contrast,
                 slam_status=slam_status,
+                odom_step_cells=odom_used.step_cells,
+                odom_yaw_deg=math.degrees(odom_used.yaw_delta),
+                odom_steer_deg=odom_used.steer_deg,
                 prefix="hold=pose_recovery ",
                 )
 
@@ -291,6 +330,16 @@ def drive_to_goal(
                         last_motion_t=last_motion_t,
                     )
                     if recovered:
+                        reverse_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.stuck_reverse_speed_scale))))
+                        pending_odom = PendingOdom(
+                            step_cells=-_estimate_translation_step_cells_for_duration(
+                                loop_cfg.stuck_reverse_s,
+                                motor,
+                                speed=reverse_speed,
+                            ),
+                            yaw_delta=0.0,
+                            steer_deg=0.0,
+                        )
                         current_path = None
                         ultra_countdown = 0
                     continue
@@ -304,6 +353,16 @@ def drive_to_goal(
                     last_motion_t=last_motion_t,
                 )
                 if recovered:
+                    reverse_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.stuck_reverse_speed_scale))))
+                    pending_odom = PendingOdom(
+                        step_cells=-_estimate_translation_step_cells_for_duration(
+                            loop_cfg.stuck_reverse_s,
+                            motor,
+                            speed=reverse_speed,
+                        ),
+                        yaw_delta=0.0,
+                        steer_deg=0.0,
+                    )
                     ultra_countdown = 0
                     continue
                 time.sleep(follower.cfg.dt)
@@ -312,7 +371,14 @@ def drive_to_goal(
             # Set steering
             steer_deg = follower.steering_command(current_path, pose_grid, d_goal)
             motor.set_steering(steer_deg)
+            applied_steer_deg = motor.get_applied_steering_deg()
             motor.forward_for(follower.cfg.dt, speed=int(motor.cfg.speed))
+            step_cells = _estimate_translation_step_cells(follower, motor)
+            pending_odom = PendingOdom(
+                step_cells=step_cells,
+                yaw_delta=_estimate_ackermann_yaw_delta(step_cells, applied_steer_deg, follower),
+                steer_deg=applied_steer_deg,
+            )
             last_motion_t = time.time()
 
     finally:
@@ -343,7 +409,7 @@ def main() -> None:
             debug_draw_keypoints=True,
             debug_draw_matches=True,
             translation_step=0.2,
-            forward_sign=-1.0,
+            forward_sign=1.0,
             pose_ema_alpha=0.25,
             gray_use_clahe=True,
             gray_clahe_clip_limit=2.5,
@@ -357,7 +423,7 @@ def main() -> None:
         step_seconds=0.40,
         brake_between_steps=False,
         steering_slew_deg_per_s=90.0,
-        steer_sign=-1.0,
+        steer_sign=1.0,
         steer_offset_deg=0.0,
         max_steer_deg=35.0,
         settle_seconds=0.01,
