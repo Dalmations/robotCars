@@ -562,7 +562,13 @@ def drive_to_goal(
 
 
 def main() -> None:
-    world_size = (30, 30)
+    shared_map = SharedMap()
+    shared_map.configure_grid(
+        size=(30, 30),
+        resolution=1.0,
+        origin_world=(-7.0, -7.0),
+    )
+    shared_map.set_pose(0, Pose(0.0, 0.0, 0.0))
 
     planner = MovementPlanner(
         planning_cfg=PlanningConfig(
@@ -570,17 +576,8 @@ def main() -> None:
             inflation_radius_cells=0,
             simplify_path=True,
             nudge_start_goal=True,
-        ),
-        world_size=world_size,
+        )
     )
-
-    shared_map = SharedMap()
-    shared_map.configure_grid(
-        size=planner.world_size if planner.world_size is not None else shared_map.grid.size,
-        resolution=1.0,
-        origin_world=(-7.0, -7.0),
-    )
-    shared_map.set_pose(0, Pose(0.0, 0.0, 0.0))
 
     motor = MotorController(MotorConfig(
         speed=26,
@@ -594,9 +591,9 @@ def main() -> None:
 
     follower = PathFollower(motor, FollowerConfig(
         lookahead=8.0,
-        wheelbase=2.2,
-        odom_wheelbase=1.6,
-        pivot_odom_wheelbase=0.95,
+        wheelbase=0.2,
+        odom_wheelbase=0.2,
+        pivot_odom_wheelbase=0.2,
         goal_tolerance=0.6,
         steer_sign=1.0,
         max_steer_deg=motor.cfg.max_steer_deg,

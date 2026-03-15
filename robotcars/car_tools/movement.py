@@ -82,7 +82,6 @@ class MovementPlanner:
     A* / weighted A* planner over the shared occupancy grid.
     """
     planning_cfg: PlanningConfig | object = field(default_factory=PlanningConfig)
-    world_size: Optional[tuple[int, int]] = None
 
     def plan_to_target(
         self,
@@ -93,7 +92,7 @@ class MovementPlanner:
     ) -> Path:
         cfg = self._cfg()
 
-        size = self.world_size if self.world_size is not None else getattr(shared_map, "grid").size
+        size = getattr(shared_map, "grid").size
         w, h = int(size[0]), int(size[1])
 
         start = self._clamp_point(shared_map.get_car_grid_position(), w, h)
