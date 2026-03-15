@@ -37,6 +37,7 @@ class LoopConfig:
     ahead_cm_max: float = 120.0
     ultra_timer_period_s: float = 0.1
     ultra_last_valid_ttl_s: float = 0.35
+    action_tick_s: float = 0.10
     ultra_stop_cm: float = 20.0
     ultra_caution_cm: float = 40.0
 
@@ -45,7 +46,7 @@ class LoopConfig:
     pivot_turn_heading_deg: float = 90.0
     hard_turn_duration_scale: float = 0.55
     hard_turn_speed_scale: float = 0.75
-    pivot_turn_duration_s: float = 0.12
+    pivot_turn_duration_s: float = 0.50
     pivot_turn_speed_scale: float = 0.75
     escape_pivot_forward_scale: float = 0.65
     escape_pivot_reverse_scale: float = 1.0
@@ -75,6 +76,29 @@ class DriveCommand:
     odom_steer_deg: float = 0.0
     yaw_delta: float = 0.0
     pivot_direction: float = 0.0
+
+
+@dataclass
+class MotionPhase:
+    motion: str
+    steer_deg: float
+    speed: int
+    ticks_remaining: int
+
+
+@dataclass
+class ActionState:
+    drive_mode: str
+    target_x: float
+    target_y: float
+    heading_error_deg: float
+    path_len: int
+    phases: list[MotionPhase]
+    replan_after: bool = False
+
+
+def _duration_to_ticks(duration_s: float, tick_s: float) -> int:
+    return max(1, int(math.ceil(max(0.0, float(duration_s)) / max(1e-6, float(tick_s)))))
 
 
 def _tick_ultrasonic(
@@ -221,19 +245,20 @@ def _pivot_direction_sign(
     return sign, (target_x, target_y), heading_error_deg
 
 
-def _run_escape_pivot(
+def _build_pivot_action(
     *,
     current_path: Optional[Path],
     pose_grid: Pose,
     goal_xy_grid: Tuple[int, int],
     d_goal: float,
-    ultra_state: UltrasonicState,
-    shared_map: SharedMap,
     follower: PathFollower,
     motor: MotorController,
     loop_cfg: LoopConfig,
-    car_id: int,
-) -> None:
+    drive_mode: str,
+    reverse_scale: float,
+    forward_scale: float,
+    replan_after: bool,
+) -> ActionState:
     direction_sign, target_xy, heading_error_deg = _pivot_direction_sign(
         current_path=current_path,
         pose_grid=pose_grid,
@@ -242,31 +267,26 @@ def _run_escape_pivot(
         follower=follower,
     )
     pivot_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.pivot_turn_speed_scale))))
-    result = follower.pivot_turn(
-        shared_map=shared_map,
-        car_id=car_id,
-        direction_sign=direction_sign,
-        segment_s=float(loop_cfg.pivot_turn_duration_s),
-        speed=pivot_speed,
-        reverse_scale=float(loop_cfg.escape_pivot_reverse_scale),
-        forward_scale=float(loop_cfg.escape_pivot_forward_scale),
-    )
-    _log_drive_status(
-        pose_grid=pose_grid,
-        goal_xy_grid=goal_xy_grid,
-        d_goal=d_goal,
-        dist_cm=ultra_state.dist_cm,
-        ultra_countdown=ultra_state.countdown,
-        path_len=0 if current_path is None else len(current_path.waypoints),
-        target_xy=target_xy,
+    steer_abs = float(follower.cfg.max_steer_deg)
+    tick_s = float(loop_cfg.action_tick_s)
+    phases: list[MotionPhase] = []
+
+    reverse_ticks = _duration_to_ticks(float(loop_cfg.pivot_turn_duration_s) * float(reverse_scale), tick_s)
+    if reverse_ticks > 0:
+        phases.append(MotionPhase("reverse", -direction_sign * steer_abs, pivot_speed, reverse_ticks))
+
+    forward_ticks = _duration_to_ticks(float(loop_cfg.pivot_turn_duration_s) * float(forward_scale), tick_s)
+    if forward_ticks > 0:
+        phases.append(MotionPhase("forward", direction_sign * steer_abs, pivot_speed, forward_ticks))
+
+    return ActionState(
+        drive_mode=drive_mode,
+        target_x=target_xy[0],
+        target_y=target_xy[1],
         heading_error_deg=heading_error_deg,
-        odom_step_cells=result.forward_step,
-        odom_yaw_deg=math.degrees(result.yaw_delta),
-        odom_steer_deg=result.applied_steer_deg,
-        drive_mode="escape_pivot",
-        drive_speed=pivot_speed,
-        drive_duration_s=float(loop_cfg.pivot_turn_duration_s),
-        prefix="dead_reckon ",
+        path_len=0 if current_path is None else len(current_path.waypoints),
+        phases=phases,
+        replan_after=replan_after,
     )
 
 
@@ -281,44 +301,45 @@ def _maybe_escape_or_continue(
     follower: PathFollower,
     motor: MotorController,
     loop_cfg: LoopConfig,
-    car_id: int,
-) -> tuple[Optional[Path], bool]:
+) -> tuple[Optional[Path], Optional[ActionState]]:
     if current_path is None or len(current_path.waypoints) < 2:
-        _run_escape_pivot(
+        action = _build_pivot_action(
             current_path=current_path,
             pose_grid=pose_grid,
             goal_xy_grid=goal_xy_grid,
             d_goal=d_goal,
-            ultra_state=ultra_state,
-            shared_map=shared_map,
             follower=follower,
             motor=motor,
             loop_cfg=loop_cfg,
-            car_id=car_id,
+            drive_mode="escape_pivot",
+            reverse_scale=float(loop_cfg.escape_pivot_reverse_scale),
+            forward_scale=float(loop_cfg.escape_pivot_forward_scale),
+            replan_after=True,
         )
-        return None, True
+        return None, action
 
     close_obstacle = ultra_state.dist_cm is not None and ultra_state.dist_cm <= loop_cfg.close_obstacle_replan_cm
     blocked = ultra_state.countdown < int(loop_cfg.min_forward_ultra_countdown)
     if close_obstacle or blocked:
-        _run_escape_pivot(
+        action = _build_pivot_action(
             current_path=current_path,
             pose_grid=pose_grid,
             goal_xy_grid=goal_xy_grid,
             d_goal=d_goal,
-            ultra_state=ultra_state,
-            shared_map=shared_map,
             follower=follower,
             motor=motor,
             loop_cfg=loop_cfg,
-            car_id=car_id,
+            drive_mode="escape_pivot",
+            reverse_scale=float(loop_cfg.escape_pivot_reverse_scale),
+            forward_scale=float(loop_cfg.escape_pivot_forward_scale),
+            replan_after=True,
         )
-        return None, True
+        return None, action
 
-    return current_path, False
+    return current_path, None
 
 
-def _build_drive_command(
+def _build_motion_action(
     *,
     current_path: Path,
     pose_grid: Pose,
@@ -326,19 +347,26 @@ def _build_drive_command(
     follower: PathFollower,
     motor: MotorController,
     loop_cfg: LoopConfig,
-) -> DriveCommand:
+) -> ActionState:
     target_x, target_y, heading_error_deg, steer_deg = follower.tracking_command(current_path, pose_grid, d_goal)
 
-    drive_duration_s = float(follower.cfg.dt)
+    drive_duration_s = float(loop_cfg.action_tick_s)
     drive_speed = int(motor.cfg.speed)
     drive_mode = "track"
-    pivot_direction = 0.0
     if abs(heading_error_deg) >= float(loop_cfg.pivot_turn_heading_deg):
-        drive_mode = "pivot_turn"
-        drive_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.pivot_turn_speed_scale))))
-        drive_duration_s = float(loop_cfg.pivot_turn_duration_s)
-        steer_deg = float(follower.cfg.max_steer_deg) * (1.0 if heading_error_deg >= 0.0 else -1.0)
-        pivot_direction = 1.0 if heading_error_deg >= 0.0 else -1.0
+        return _build_pivot_action(
+            current_path=current_path,
+            pose_grid=pose_grid,
+            goal_xy_grid=(int(round(target_x)), int(round(target_y))),
+            d_goal=d_goal,
+            follower=follower,
+            motor=motor,
+            loop_cfg=loop_cfg,
+            drive_mode="pivot_turn",
+            reverse_scale=1.0,
+            forward_scale=1.0,
+            replan_after=False,
+        )
     elif abs(heading_error_deg) >= float(loop_cfg.hard_turn_heading_deg):
         drive_duration_s *= float(loop_cfg.hard_turn_duration_scale)
         drive_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.hard_turn_speed_scale))))
@@ -349,63 +377,79 @@ def _build_drive_command(
             float(follower.cfg.max_steer_deg),
         )
 
-    return DriveCommand(
+    return ActionState(
         target_x=target_x,
         target_y=target_y,
         heading_error_deg=heading_error_deg,
-        steer_deg=steer_deg,
         drive_mode=drive_mode,
-        drive_speed=drive_speed,
-        drive_duration_s=drive_duration_s,
-        pivot_direction=pivot_direction,
+        path_len=len(current_path.waypoints),
+        phases=[MotionPhase("forward", steer_deg, drive_speed, _duration_to_ticks(drive_duration_s, loop_cfg.action_tick_s))],
     )
 
 
-def _apply_drive_command(
+def _apply_action_tick(
     *,
-    command: DriveCommand,
+    action: ActionState,
     shared_map: SharedMap,
     follower: PathFollower,
     motor: MotorController,
+    loop_cfg: LoopConfig,
     car_id: int,
-) -> DriveCommand:
-    if command.drive_mode == "pivot_turn":
-        result = follower.pivot_turn(
-            shared_map=shared_map,
-            car_id=car_id,
-            direction_sign=command.pivot_direction,
-            segment_s=command.drive_duration_s,
-            speed=command.drive_speed,
-        )
-        command.odom_step_cells = result.forward_step
-        command.yaw_delta = result.yaw_delta
-        command.odom_yaw_deg = math.degrees(result.yaw_delta)
-        command.odom_steer_deg = result.applied_steer_deg
-        return command
+) -> tuple[Optional[ActionState], DriveCommand, bool]:
+    phase = action.phases[0]
+    tick_s = float(min(float(loop_cfg.action_tick_s), float(follower.cfg.dt)))
 
-    command.odom_step_cells = estimate_step_cells_for_duration(
-        command.drive_duration_s,
+    odom_step_mag = estimate_step_cells_for_duration(
+        tick_s,
         step_seconds=float(motor.cfg.step_seconds),
-        speed=command.drive_speed,
+        speed=phase.speed,
         speed_ref=int(motor.cfg.speed),
     )
-    motor.set_steering(command.steer_deg)
-    command.odom_steer_deg = motor.get_applied_steering_deg()
-    command.yaw_delta = estimate_ackermann_yaw_delta(
-        command.odom_step_cells,
-        command.odom_steer_deg,
+    motor.set_steering(phase.steer_deg)
+    odom_steer_deg = motor.get_applied_steering_deg()
+    signed_step = odom_step_mag if phase.motion == "forward" else -odom_step_mag
+    yaw_delta = estimate_ackermann_yaw_delta(
+        signed_step,
+        odom_steer_deg,
         float(follower.cfg.wheelbase),
     )
-    command.odom_yaw_deg = math.degrees(command.yaw_delta)
-
-    motor.forward_for(command.drive_duration_s, speed=command.drive_speed)
+    if phase.motion == "forward":
+        motor.forward_for(tick_s, speed=phase.speed)
+    else:
+        motor.backward_for(tick_s, speed=phase.speed)
     integrate_dead_reckoning(
         shared_map=shared_map,
         car_id=car_id,
-        forward_step=command.odom_step_cells,
-        yaw_delta=command.yaw_delta,
+        forward_step=signed_step,
+        yaw_delta=yaw_delta,
     )
-    return command
+
+    command = DriveCommand(
+        target_x=action.target_x,
+        target_y=action.target_y,
+        heading_error_deg=action.heading_error_deg,
+        steer_deg=phase.steer_deg,
+        drive_mode=f"{action.drive_mode}_{phase.motion}" if len(action.phases) > 1 else action.drive_mode,
+        drive_speed=phase.speed,
+        drive_duration_s=tick_s,
+        odom_step_cells=signed_step,
+        odom_yaw_deg=math.degrees(yaw_delta),
+        odom_steer_deg=odom_steer_deg,
+        yaw_delta=yaw_delta,
+    )
+
+    phase.ticks_remaining -= 1
+    if phase.ticks_remaining <= 0:
+        action.phases.pop(0)
+
+    should_replan = False
+    if not action.phases:
+        if action.drive_mode in {"pivot_turn", "escape_pivot"}:
+            follower.reset()
+        should_replan = bool(action.replan_after)
+        return None, command, should_replan
+
+    return action, command, False
 
 
 def _log_drive_status(
@@ -468,6 +512,7 @@ def drive_to_goal(
 
     last_ultra_tick_t = 0.0
     t0 = time.time()
+    active_action: Optional[ActionState] = None
     follower.reset()
 
     try:
@@ -498,46 +543,49 @@ def drive_to_goal(
                 motor.mark_reached()
                 return True
 
-            current_path = _ensure_path(
-                current_path=current_path,
-                planner=planner,
-                shared_map=shared_map,
-                goal_target=goal_target,
-                debug_show_grid=debug_show_grid,
-                car_id=car_id,
-            )
-            current_path, should_continue = _maybe_escape_or_continue(
-                current_path=current_path,
-                pose_grid=pose_grid,
-                goal_xy_grid=goal_xy_grid,
-                d_goal=d_goal,
-                ultra_state=ultra_state,
-                shared_map=shared_map,
-                follower=follower,
-                motor=motor,
-                loop_cfg=loop_cfg,
-                car_id=car_id,
-            )
-            if should_continue:
-                continue
+            if active_action is None:
+                current_path = _ensure_path(
+                    current_path=current_path,
+                    planner=planner,
+                    shared_map=shared_map,
+                    goal_target=goal_target,
+                    debug_show_grid=debug_show_grid,
+                    car_id=car_id,
+                )
+                current_path, active_action = _maybe_escape_or_continue(
+                    current_path=current_path,
+                    pose_grid=pose_grid,
+                    goal_xy_grid=goal_xy_grid,
+                    d_goal=d_goal,
+                    ultra_state=ultra_state,
+                    shared_map=shared_map,
+                    follower=follower,
+                    motor=motor,
+                    loop_cfg=loop_cfg,
+                )
+                if active_action is None:
+                    assert current_path is not None
+                    active_action = _build_motion_action(
+                        current_path=current_path,
+                        pose_grid=pose_grid,
+                        d_goal=d_goal,
+                        follower=follower,
+                        motor=motor,
+                        loop_cfg=loop_cfg,
+                    )
 
-            assert current_path is not None
-            path_len = len(current_path.waypoints) if current_path is not None else 0
-            command = _build_drive_command(
-                current_path=current_path,
-                pose_grid=pose_grid,
-                d_goal=d_goal,
-                follower=follower,
-                motor=motor,
-                loop_cfg=loop_cfg,
-            )
-            command = _apply_drive_command(
-                command=command,
+            assert active_action is not None
+            path_len = active_action.path_len
+            active_action, command, should_replan = _apply_action_tick(
+                action=active_action,
                 shared_map=shared_map,
                 follower=follower,
                 motor=motor,
+                loop_cfg=loop_cfg,
                 car_id=car_id,
             )
+            if should_replan:
+                current_path = None
 
             _log_drive_status(
                 pose_grid=pose_grid,

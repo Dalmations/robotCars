@@ -59,14 +59,6 @@ def integrate_dead_reckoning(
     shared_map.set_pose(car_id, next_pose)
     return next_pose
 
-
-@dataclass
-class PivotTurnResult:
-    forward_step: float
-    yaw_delta: float
-    applied_steer_deg: float
-
-
 @dataclass
 class FollowerConfig:
     dt: float = 0.10
@@ -110,12 +102,32 @@ class PathFollower:
             return (waypoints[0].x, waypoints[0].y)
 
         px, py = pose.x, pose.y
-        d2 = [(wp.x - px) ** 2 + (wp.y - py) ** 2 for wp in waypoints]
-        i0 = min(range(len(d2)), key=d2.__getitem__)
+        best_dist2 = float("inf")
+        best_i = 0
+        best_proj = (waypoints[0].x, waypoints[0].y)
+
+        for i in range(len(waypoints) - 1):
+            x0, y0 = waypoints[i].x, waypoints[i].y
+            x1, y1 = waypoints[i + 1].x, waypoints[i + 1].y
+            dx = x1 - x0
+            dy = y1 - y0
+            seg2 = dx * dx + dy * dy
+            if seg2 < 1e-12:
+                continue
+
+            u = ((px - x0) * dx + (py - y0) * dy) / seg2
+            u = max(0.0, min(1.0, float(u)))
+            proj = (x0 + u * dx, y0 + u * dy)
+            dist2 = (proj[0] - px) ** 2 + (proj[1] - py) ** 2
+            if dist2 < best_dist2:
+                best_dist2 = dist2
+                best_i = i
+                best_proj = proj
 
         dist_acc = 0.0
-        for i in range(i0, len(waypoints) - 1):
-            x0, y0 = waypoints[i].x, waypoints[i].y
+        start_x, start_y = best_proj
+        for i in range(best_i, len(waypoints) - 1):
+            x0, y0 = (start_x, start_y) if i == best_i else (waypoints[i].x, waypoints[i].y)
             x1, y1 = waypoints[i + 1].x, waypoints[i + 1].y
             seg = math.hypot(x1 - x0, y1 - y0)
             if seg < 1e-9:
@@ -157,76 +169,6 @@ class PathFollower:
             target_y,
             heading_error_deg,
             self._filter_steering(target_steer_deg),
-        )
-
-    def pivot_turn(
-        self,
-        *,
-        shared_map: SharedMap,
-        car_id: int,
-        direction_sign: float,
-        segment_s: float,
-        speed: int,
-        reverse_scale: float = 1.0,
-        forward_scale: float = 1.0,
-    ) -> PivotTurnResult:
-        direction = 1.0 if float(direction_sign) >= 0.0 else -1.0
-        base_duration = max(0.0, float(segment_s))
-        speed_cmd = max(1, int(speed))
-        reverse_duration = base_duration * max(0.0, float(reverse_scale))
-        forward_duration = base_duration * max(0.0, float(forward_scale))
-        steer_abs = float(self.cfg.max_steer_deg)
-        wheelbase = float(self.cfg.wheelbase)
-
-        reverse_applied = 0.0
-        reverse_yaw = 0.0
-        reverse_step = 0.0
-        if reverse_duration > 0.0:
-            self.motor.set_steering(-direction * steer_abs)
-            reverse_applied = self.motor.get_applied_steering_deg()
-            reverse_step = estimate_step_cells_for_duration(
-                reverse_duration,
-                step_seconds=float(self.motor.cfg.step_seconds),
-                speed=speed_cmd,
-                speed_ref=int(self.motor.cfg.speed),
-            )
-            self.motor.backward_for(reverse_duration, speed=speed_cmd)
-            self.motor.stop()
-            reverse_yaw = estimate_ackermann_yaw_delta(-reverse_step, reverse_applied, wheelbase)
-            integrate_dead_reckoning(
-                shared_map=shared_map,
-                car_id=car_id,
-                forward_step=-reverse_step,
-                yaw_delta=reverse_yaw,
-            )
-
-        forward_applied = 0.0
-        forward_yaw = 0.0
-        forward_step = 0.0
-        if forward_duration > 0.0:
-            self.motor.set_steering(direction * steer_abs)
-            forward_applied = self.motor.get_applied_steering_deg()
-            forward_step = estimate_step_cells_for_duration(
-                forward_duration,
-                step_seconds=float(self.motor.cfg.step_seconds),
-                speed=speed_cmd,
-                speed_ref=int(self.motor.cfg.speed),
-            )
-            self.motor.forward_for(forward_duration, speed=speed_cmd)
-            self.motor.stop()
-            forward_yaw = estimate_ackermann_yaw_delta(forward_step, forward_applied, wheelbase)
-            integrate_dead_reckoning(
-                shared_map=shared_map,
-                car_id=car_id,
-                forward_step=forward_step,
-                yaw_delta=forward_yaw,
-            )
-
-        self._filtered_steer_deg = 0.0
-        return PivotTurnResult(
-            forward_step=float(forward_step - reverse_step),
-            yaw_delta=float(reverse_yaw + forward_yaw),
-            applied_steer_deg=float(direction * max(abs(reverse_applied), abs(forward_applied))),
         )
 
     def _filter_steering(self, target_deg: float) -> float:
