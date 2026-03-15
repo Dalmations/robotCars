@@ -24,7 +24,6 @@ class MotorConfig:
 
     # Safety / timing
     settle_seconds: float = 0.02       # pause after steering changes
-    brake_between_steps: bool = True   # stop motor between forward_for calls
 
 
 class MotorController:
@@ -94,9 +93,6 @@ class MotorController:
         self.px.forward(spd)
         time.sleep(float(seconds))
 
-        if self.cfg.brake_between_steps:
-            self.stop()
-
     def backward_for(self, seconds: float, *, speed: Optional[int] = None) -> None:
         if seconds <= 0:
             return
@@ -104,12 +100,6 @@ class MotorController:
         self.px.backward(spd)
 
         time.sleep(float(seconds))
-
-        if self.cfg.brake_between_steps:
-            self.stop()
-
-    def step_forward(self) -> None:
-        self.forward_for(self.cfg.step_seconds)
 
     def stop(self) -> None:
         self.px.stop()

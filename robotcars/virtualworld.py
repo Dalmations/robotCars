@@ -10,38 +10,7 @@ import numpy as np
 
 Grid = np.ndarray
 Point = Tuple[int, int]  # (x, y)
-
 SQRT2 = math.sqrt(2.0)
-
-
-@dataclass(frozen=True)
-class VirtualWorld:
-    """
-    Holds an occupancy grid (0=free, 1=obstacle) and an optional height map.
-    By default, the world is EMPTY (no obstacles) unless you add them explicitly.
-    """
-    grid: Grid
-    height: Optional[Grid] = None
-
-    @property
-    def size(self) -> Tuple[int, int]:
-        w, h = self.grid.shape
-        return w, h
-
-    def in_bounds(self, p: Point) -> bool:
-        x, y = p
-        w, h = self.size
-        return 0 <= x < w and 0 <= y < h
-
-    def is_free(self, p: Point) -> bool:
-        x, y = p
-        return self.grid[x, y] == 0
-
-    def add_rect_obstacle(self, x0: int, x1: int, y0: int, y1: int) -> None:
-        """In-place add an axis-aligned rectangular obstacle."""
-        self.grid[x0:x1, y0:y1] = 1
-        if self.height is not None:
-            self.height[self.grid == 1] += 3.0
 
 
 def heuristic_octile(a: Point, b: Point) -> float:

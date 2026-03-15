@@ -22,15 +22,6 @@ class SpeechResult:
         )
 
 
-class Scenario:
-    def __init__(self, name: str, params: Dict[str, Any]):
-        self.name = name
-        self.params = params
-
-    def __repr__(self) -> str:
-        return f"Scenario(name={self.name!r}, params={self.params})"
-
-
 class Pose:
     def __init__(self, x: float, y: float, theta: float):
         self.x = float(x)
@@ -78,13 +69,6 @@ class Obstacle:
             f"r={self.radius:.2f}, moving={self.is_moving})"
         )
 
-
-class Observations:
-    def __init__(self, obstacles: Optional[List[Obstacle]] = None):
-        self.obstacles = obstacles if obstacles is not None else []
-
-    def __repr__(self) -> str:
-        return f"Observations(n_obstacles={len(self.obstacles)})"
 
 
 class Path:

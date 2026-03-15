@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Tuple, Literal
 
 import numpy as np
 
-from model import Observations, Pose, Scenario, TargetPoint, Path, Obstacle
+from model import Pose, TargetPoint, Path, Obstacle
 
 try:
     import cv2
