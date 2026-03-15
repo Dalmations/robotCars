@@ -165,14 +165,18 @@ def _show_grid_debug_frame(
     *,
     shared_map: SharedMap,
     current_path: Optional[Path],
-    target: TargetPoint,
+    goal_target: TargetPoint,
+    control_target: Optional[TargetPoint],
+    info_lines: Optional[list[str]],
     car_id: int,
 ) -> None:
     frame = shared_map.render_grid_debug_view(
         car_id=car_id,
         path=current_path,
-        target=target,
+        target=goal_target,
+        control_target=control_target,
         cell_px=14,
+        info_lines=info_lines,
     )
     cv2.imshow("Planning debug", frame)
     cv2.waitKey(1)
@@ -195,7 +199,9 @@ def _plan_goal_path(
         _show_grid_debug_frame(
             shared_map=shared_map,
             current_path=path,
-            target=goal_target,
+            goal_target=goal_target,
+            control_target=None,
+            info_lines=["planning"],
             car_id=car_id,
         )
     return path
@@ -357,8 +363,11 @@ def _build_motion_action(
     drive_duration_s = float(loop_cfg.action_tick_s)
     drive_speed = int(motor.cfg.speed)
     drive_mode = "track"
+    near_goal = d_goal <= float(follower.cfg.dock_distance_grid)
     # If heading error is very large, pivot turn to get heading aligned
-    if abs(heading_error_deg) >= float(loop_cfg.pivot_turn_heading_deg):
+    if abs(heading_error_deg) >= float(loop_cfg.pivot_turn_heading_deg) or (
+        near_goal and abs(heading_error_deg) >= float(loop_cfg.hard_turn_heading_deg)
+    ):
         return _build_pivot_action(
             current_path=current_path,
             pose_grid=pose_grid,
@@ -369,7 +378,7 @@ def _build_motion_action(
             loop_cfg=loop_cfg,
             drive_mode="pivot_turn",
             reverse_scale=1.0,
-            forward_scale=1.0,
+            forward_scale=float(loop_cfg.escape_pivot_forward_scale) if near_goal else 1.0,
             replan_after=False,
         )
     # If heading error is moderately large, do a hard turn
@@ -652,6 +661,32 @@ def drive_to_goal(
                 drive_duration_s=command.drive_duration_s,
                 prefix="dead_reckon ",
             )
+
+            if debug_show_grid:
+                live_pose = shared_map.get_pose(car_id, frame="grid")
+                live_path_len = 0 if current_path is None else len(current_path.waypoints)
+                live_info = [
+                    (
+                        f"mode={command.drive_mode} d={d_goal:.2f} "
+                        f"head_err={command.heading_error_deg:.1f} steer={command.odom_steer_deg:.1f}"
+                    ),
+                    (
+                        f"ultra={'None' if ultra_state.dist_cm is None else f'{ultra_state.dist_cm:.1f}cm'} "
+                        f"countdown={ultra_state.countdown} path_n={live_path_len}"
+                    ),
+                ]
+                if live_pose is not None:
+                    live_info.append(
+                        f"pose=({live_pose.x:.2f},{live_pose.y:.2f},{live_pose.theta:.2f})"
+                    )
+                _show_grid_debug_frame(
+                    shared_map=shared_map,
+                    current_path=current_path,
+                    goal_target=goal_target,
+                    control_target=TargetPoint(command.target_x, command.target_y),
+                    info_lines=live_info,
+                    car_id=car_id,
+                )
     finally:
         motor.stop()
 

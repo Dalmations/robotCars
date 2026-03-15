@@ -164,11 +164,16 @@ class PathFollower:
         heading_error_deg = math.degrees(heading_error_rad)
 
         if abs(heading_error_deg) > 20.0:
-            lookahead_scale = min(
-                float(self.cfg.heading_lookahead_max_scale),
-                1.0 + float(self.cfg.heading_lookahead_gain) * (abs(heading_error_deg) - 20.0),
-            )
-            target_x, target_y = self._lookahead_point(path, pose, lookahead * lookahead_scale)
+            if goal_distance > self.cfg.dock_distance_grid:
+                lookahead_scale = min(
+                    float(self.cfg.heading_lookahead_max_scale),
+                    1.0 + float(self.cfg.heading_lookahead_gain) * (abs(heading_error_deg) - 20.0),
+                )
+                adjusted_lookahead = lookahead * lookahead_scale
+            else:
+                tighten_scale = max(0.55, 1.0 - 0.004 * (abs(heading_error_deg) - 20.0))
+                adjusted_lookahead = max(float(self.cfg.dock_min_lookahead_grid), lookahead * tighten_scale)
+            target_x, target_y = self._lookahead_point(path, pose, adjusted_lookahead)
             heading_error_rad = wrap_angle(math.atan2(target_y - pose.y, target_x - pose.x) - pose.theta)
             heading_error_deg = math.degrees(heading_error_rad)
         return target_x, target_y, heading_error_deg
