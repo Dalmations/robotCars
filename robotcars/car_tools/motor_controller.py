@@ -66,7 +66,7 @@ class MotorController:
         # Clamp to servo limits
         cmd = max(-self.cfg.max_steer_deg, min(self.cfg.max_steer_deg, cmd))
 
-        # Slew limit if enabled
+        # Slew limit
         if self.cfg.steering_slew_deg_per_s > 0:
             now = time.time()
             dt = max(1e-6, now - self._last_servo_time)

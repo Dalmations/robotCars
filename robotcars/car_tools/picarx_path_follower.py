@@ -61,7 +61,6 @@ def integrate_dead_reckoning(
 
 @dataclass
 class FollowerConfig:
-    dt: float = 0.10
     lookahead: float = 6.0
     wheelbase: float = 5.0
     goal_tolerance: float = 2.0
@@ -72,6 +71,8 @@ class FollowerConfig:
     steer_alpha: float = 0.25
     steer_deadband_deg: float = 2.0
     steer_rate_limit_deg_per_tick: float = 12.0
+    heading_lookahead_gain: float = 0.012
+    heading_lookahead_max_scale: float = 1.75
 
     dock_distance_grid: float = 12.0
     dock_min_lookahead_grid: float = 6.0
@@ -87,6 +88,9 @@ class PathFollower:
         self._filtered_steer_deg = 0.0
         if hasattr(self.motor, "reset_reached"):
             self.motor.reset_reached()
+
+    def sync_to_motor_steering(self) -> None:
+        self._filtered_steer_deg = float(self.motor.get_applied_steering_deg())
 
     def _compute_lookahead(self, goal_distance: float) -> float:
         lookahead = float(self.cfg.lookahead)
@@ -157,13 +161,42 @@ class PathFollower:
         lookahead = self._compute_lookahead(goal_distance)
         target_x, target_y = self._lookahead_point(path, pose, lookahead)
         heading_error_rad = wrap_angle(math.atan2(target_y - pose.y, target_x - pose.x) - pose.theta)
-        return target_x, target_y, math.degrees(heading_error_rad)
+        heading_error_deg = math.degrees(heading_error_rad)
 
-    def tracking_command(self, path: Path, pose: Pose, goal_distance: float) -> Tuple[float, float, float, float]:
+        if abs(heading_error_deg) > 20.0:
+            lookahead_scale = min(
+                float(self.cfg.heading_lookahead_max_scale),
+                1.0 + float(self.cfg.heading_lookahead_gain) * (abs(heading_error_deg) - 20.0),
+            )
+            target_x, target_y = self._lookahead_point(path, pose, lookahead * lookahead_scale)
+            heading_error_rad = wrap_angle(math.atan2(target_y - pose.y, target_x - pose.x) - pose.theta)
+            heading_error_deg = math.degrees(heading_error_rad)
+        return target_x, target_y, heading_error_deg
+
+    def tracking_command(
+        self,
+        path: Path,
+        pose: Pose,
+        goal_distance: float,
+        *,
+        steer_cap_deg: Optional[float] = None,
+    ) -> Tuple[float, float, float, float]:
         """Return target x/y, heading error in degrees, and filtered steer in degrees."""
         target_x, target_y, heading_error_deg = self.tracking_geometry(path, pose, goal_distance)
         delta = self._pure_pursuit_delta(pose, target_x=target_x, target_y=target_y)
         target_steer_deg = self._clamp_steer(math.degrees(delta) * float(self.cfg.steer_sign))
+        if steer_cap_deg is not None:
+            steer_cap = min(abs(float(steer_cap_deg)), float(self.cfg.max_steer_deg))
+            target_steer_deg = max(-steer_cap, min(steer_cap, target_steer_deg))
+            filtered = self._filter_steering(target_steer_deg)
+            filtered = max(-steer_cap, min(steer_cap, filtered))
+            self._filtered_steer_deg = filtered
+            return (
+                target_x,
+                target_y,
+                heading_error_deg,
+                filtered,
+            )
         return (
             target_x,
             target_y,
