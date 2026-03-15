@@ -465,7 +465,7 @@ def _apply_action_tick(
     yaw_delta = estimate_ackermann_yaw_delta(
         signed_step,
         odom_steer_deg,
-        follower.odom_wheelbase(),
+        follower.odom_wheelbase_for_mode(action.drive_mode),
     )
     if phase.motion == "forward":
         motor.forward_for(tick_s, speed=phase.speed)
@@ -729,6 +729,7 @@ def main() -> None:
         lookahead=8.0,
         wheelbase=2.2,
         odom_wheelbase=1.6,
+        pivot_odom_wheelbase=0.95,
         goal_tolerance=0.6,
         steer_sign=1.0,
         max_steer_deg=motor.cfg.max_steer_deg,

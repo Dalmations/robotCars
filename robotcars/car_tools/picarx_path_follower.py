@@ -64,6 +64,7 @@ class FollowerConfig:
     lookahead: float = 6.0
     wheelbase: float = 5.0
     odom_wheelbase: Optional[float] = None
+    pivot_odom_wheelbase: Optional[float] = None
     goal_tolerance: float = 2.0
 
     steer_sign: float = 1.0
@@ -99,6 +100,11 @@ class PathFollower:
         if self.cfg.odom_wheelbase is not None:
             return max(1e-6, float(self.cfg.odom_wheelbase))
         return max(1e-6, float(self.cfg.wheelbase))
+
+    def odom_wheelbase_for_mode(self, drive_mode: str) -> float:
+        if drive_mode in {"pivot_turn", "escape_pivot"} and self.cfg.pivot_odom_wheelbase is not None:
+            return max(1e-6, float(self.cfg.pivot_odom_wheelbase))
+        return self.odom_wheelbase()
 
     def _compute_lookahead(self, goal_distance: float) -> float:
         lookahead = float(self.cfg.lookahead)
