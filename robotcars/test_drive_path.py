@@ -41,7 +41,7 @@ class LoopConfig:
     ultra_caution_cm: float = 40.0
 
     close_obstacle_replan_cm: float = 15.0
-    hard_turn_heading_deg: float = 70.0
+    hard_turn_heading_deg: float = 60.0
     pivot_turn_heading_deg: float = 90.0
     hard_turn_duration_scale: float = 0.55
     hard_turn_speed_scale: float = 0.75
@@ -465,7 +465,7 @@ def _apply_action_tick(
     yaw_delta = estimate_ackermann_yaw_delta(
         signed_step,
         odom_steer_deg,
-        float(follower.cfg.wheelbase),
+        follower.odom_wheelbase(),
     )
     if phase.motion == "forward":
         motor.forward_for(tick_s, speed=phase.speed)
@@ -728,7 +728,8 @@ def main() -> None:
     follower = PathFollower(motor, FollowerConfig(
         lookahead=8.0,
         wheelbase=2.2,
-        goal_tolerance=1.25,
+        odom_wheelbase=1.6,
+        goal_tolerance=0.6,
         steer_sign=1.0,
         max_steer_deg=motor.cfg.max_steer_deg,
         steer_alpha=0.25,

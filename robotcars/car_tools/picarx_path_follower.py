@@ -63,6 +63,7 @@ def integrate_dead_reckoning(
 class FollowerConfig:
     lookahead: float = 6.0
     wheelbase: float = 5.0
+    odom_wheelbase: Optional[float] = None
     goal_tolerance: float = 2.0
 
     steer_sign: float = 1.0
@@ -91,6 +92,13 @@ class PathFollower:
 
     def sync_to_motor_steering(self) -> None:
         self._filtered_steer_deg = float(self.motor.get_applied_steering_deg())
+
+    def odom_wheelbase(self) -> float:
+        # Dead-reckoning usually needs a calibrated "effective" wheelbase that
+        # differs a bit from the steering model wheelbase.
+        if self.cfg.odom_wheelbase is not None:
+            return max(1e-6, float(self.cfg.odom_wheelbase))
+        return max(1e-6, float(self.cfg.wheelbase))
 
     def _compute_lookahead(self, goal_distance: float) -> float:
         lookahead = float(self.cfg.lookahead)
