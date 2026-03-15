@@ -23,7 +23,6 @@ from car_tools.motor_controller import MotorController, MotorConfig
 from car_tools.picarx_path_follower import (
     PathFollower,
     FollowerConfig,
-    estimate_ackermann_yaw_delta,
     estimate_step_cells_for_duration,
     integrate_dead_reckoning,
     wrap_angle,
@@ -325,10 +324,9 @@ def _apply_action_tick(
     motor.set_steering(steer_deg)
     odom_steer_deg = motor.get_applied_steering_deg()
     signed_step = odom_step_mag if phase.motion == "forward" else -odom_step_mag
-    yaw_delta = estimate_ackermann_yaw_delta(
+    yaw_delta = follower.estimate_ackermann_yaw_delta(
         signed_step,
         odom_steer_deg,
-        follower.odom_wheelbase_for_mode(action.drive_mode),
     )
     if phase.motion == "forward":
         motor.forward_for(tick_s, speed=phase.speed)
@@ -590,10 +588,8 @@ def main() -> None:
     ))
 
     follower = PathFollower(motor, FollowerConfig(
-        lookahead=8.0,
-        wheelbase=0.2,
-        odom_wheelbase=0.2,
-        pivot_odom_wheelbase=0.2,
+        lookahead=5.0,
+        wheelbase=1.5,
         goal_tolerance=0.6,
         steer_sign=1.0,
         max_steer_deg=motor.cfg.max_steer_deg,
@@ -605,13 +601,17 @@ def main() -> None:
     ))
 
     loop_cfg = LoopConfig(
-        cm_per_grid=50.0,
+        cm_per_grid=14,
     )
 
     try:
         start_grid = shared_map.get_car_grid_position(0)
         # route = build_equilateral_triangle_route(start_grid, side_cells=6)
-        route = build_square_route(start_grid, side_cells=6)
+        # route = build_square_route(start_grid, side_cells=6)
+        route = [
+            (start_grid[0], start_grid[1]),
+            (start_grid[0] + 6, start_grid[1])
+        ]
         print("Drive route:", route)
         for goal in route[1:]:
             ok = drive_to_goal(
