@@ -524,7 +524,6 @@ def drive_to_goal(
                 path_len=path_len,
                 target_xy=(command.target_x, command.target_y),
                 heading_error_deg=command.heading_error_deg,
-                odom_step_cells=command.odom_step_cells,
                 drive_mode=command.drive_mode,
                 prefix="dead_reckon ",
             )
