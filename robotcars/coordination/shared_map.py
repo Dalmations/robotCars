@@ -92,22 +92,14 @@ class SharedMap:
         *,
         size: Tuple[int, int] = (50, 50),
         resolution: float = 1.0,
-        origin_world: Optional[Tuple[float, float]] = None,
-        center_world: Optional[Tuple[float, float]] = None,
     ) -> None:
         self.grid.size = size
         self.grid.resolution = float(resolution)
 
-        if origin_world is not None:
-            self.grid.origin_world = (float(origin_world[0]), float(origin_world[1]))
-        if center_world is not None:
-            self.grid.set_center_world((float(center_world[0]), float(center_world[1])))
-
     def world_to_grid_f(self, x: float, y: float) -> Tuple[float, float]:
-        ox, oy = self.grid.origin_world
         r = float(self.grid.resolution)
-        gx = (float(x) - ox) / r
-        gy = (float(y) - oy) / r
+        gx = x / r
+        gy = y / r
         return gx, gy
 
     def world_to_grid(self, x: float, y: float, *, clamp: bool = True) -> GridPoint:
@@ -121,10 +113,9 @@ class SharedMap:
         return (gx, gy)
 
     def grid_to_world_f(self, gx: float, gy: float) -> Tuple[float, float]:
-        ox, oy = self.grid.origin_world
         r = float(self.grid.resolution)
-        x = ox + float(gx) * r
-        y = oy + float(gy) * r
+        x = gx * r
+        y = gy * r
         return x, y
 
     def get_car_grid_position(self, car_id: int = 0) -> GridPoint:

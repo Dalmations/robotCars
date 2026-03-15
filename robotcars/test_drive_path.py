@@ -358,6 +358,7 @@ def _apply_action_tick(
 
     should_replan = False
     if not action.phases:
+        # If just finished a pivot turn, sync the follower heading to the actual motor
         if action.drive_mode in {"pivot_turn", "escape_pivot"}:
             follower.sync_to_motor_steering()
         should_replan = bool(action.replan_after)
@@ -564,7 +565,6 @@ def main() -> None:
     shared_map.configure_grid(
         size=(30, 30),
         resolution=1.0,
-        origin_world=(-7.0, -7.0),
     )
     shared_map.set_pose(0, Pose(0.0, 0.0, 0.0))
 
