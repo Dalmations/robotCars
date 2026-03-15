@@ -25,6 +25,7 @@ from car_tools.picarx_path_follower import (
     estimate_ackermann_yaw_delta,
     estimate_step_cells_for_duration,
     integrate_dead_reckoning,
+    wrap_angle,
 )
 from model import TargetPoint, Path, Pose
 
@@ -39,14 +40,15 @@ class LoopConfig:
     ultra_stop_cm: float = 20.0
     ultra_caution_cm: float = 40.0
 
-    pause_after_stop_s: float = 0.20
     close_obstacle_replan_cm: float = 15.0
-    stuck_timeout_s: float = 3.0
-    stuck_reverse_s: float = 0.30
-    stuck_reverse_speed_scale: float = 0.6
     hard_turn_heading_deg: float = 70.0
+    pivot_turn_heading_deg: float = 90.0
     hard_turn_duration_scale: float = 0.55
     hard_turn_speed_scale: float = 0.75
+    pivot_turn_duration_s: float = 0.12
+    pivot_turn_speed_scale: float = 0.75
+    escape_pivot_forward_scale: float = 0.65
+    escape_pivot_reverse_scale: float = 1.0
     heading_steer_gain: float = 0.55
     min_forward_ultra_countdown: int = 10
 
@@ -72,6 +74,7 @@ class DriveCommand:
     odom_yaw_deg: float = 0.0
     odom_steer_deg: float = 0.0
     yaw_delta: float = 0.0
+    pivot_direction: float = 0.0
 
 
 def _tick_ultrasonic(
@@ -194,49 +197,31 @@ def _ensure_path(
     )
 
 
-def _recover_from_stuck(
-    *,
-    motor: MotorController,
-    loop_cfg: LoopConfig,
-    latest_ultra_cm: Optional[float],
-    last_motion_t: float,
-) -> tuple[bool, float]:
-    motor.stop()
-
-    close_obstacle = latest_ultra_cm is not None and latest_ultra_cm <= loop_cfg.close_obstacle_replan_cm
-    if close_obstacle and (time.time() - last_motion_t) >= loop_cfg.stuck_timeout_s:
-        motor.set_steering(0.0)
-        reverse_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.stuck_reverse_speed_scale))))
-        motor.backward_for(loop_cfg.stuck_reverse_s, speed=reverse_speed)
-        motor.stop()
-        return True, time.time()
-
-    time.sleep(max(0.01, loop_cfg.pause_after_stop_s))
-    return False, last_motion_t
-
-
-def _apply_reverse_recovery(
-    *,
-    shared_map: SharedMap,
-    car_id: int,
-    motor: MotorController,
-    loop_cfg: LoopConfig,
-) -> None:
-    reverse_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.stuck_reverse_speed_scale))))
-    integrate_dead_reckoning(
-        shared_map=shared_map,
-        car_id=car_id,
-        forward_step=-estimate_step_cells_for_duration(
-            loop_cfg.stuck_reverse_s,
-            step_seconds=float(motor.cfg.step_seconds),
-            speed=reverse_speed,
-            speed_ref=int(motor.cfg.speed),
-        ),
-        yaw_delta=0.0,
+def _direction_to_goal_sign(*, pose_grid: Pose, goal_xy_grid: Tuple[int, int]) -> float:
+    heading_error = math.degrees(
+        wrap_angle(math.atan2(goal_xy_grid[1] - pose_grid.y, goal_xy_grid[0] - pose_grid.x) - pose_grid.theta)
     )
+    return 1.0 if heading_error >= 0.0 else -1.0
 
 
-def _maybe_hold_or_reverse(
+def _pivot_direction_sign(
+    *,
+    current_path: Optional[Path],
+    pose_grid: Pose,
+    goal_xy_grid: Tuple[int, int],
+    d_goal: float,
+    follower: PathFollower,
+) -> tuple[float, Tuple[float, float], float]:
+    if current_path is None or len(current_path.waypoints) < 2:
+        sign = _direction_to_goal_sign(pose_grid=pose_grid, goal_xy_grid=goal_xy_grid)
+        return sign, (float(goal_xy_grid[0]), float(goal_xy_grid[1])), 0.0
+
+    target_x, target_y, heading_error_deg = follower.tracking_geometry(current_path, pose_grid, d_goal)
+    sign = 1.0 if heading_error_deg >= 0.0 else -1.0
+    return sign, (target_x, target_y), heading_error_deg
+
+
+def _run_escape_pivot(
     *,
     current_path: Optional[Path],
     pose_grid: Pose,
@@ -248,68 +233,89 @@ def _maybe_hold_or_reverse(
     motor: MotorController,
     loop_cfg: LoopConfig,
     car_id: int,
-    last_motion_t: float,
-) -> tuple[Optional[Path], float, bool]:
+) -> None:
+    direction_sign, target_xy, heading_error_deg = _pivot_direction_sign(
+        current_path=current_path,
+        pose_grid=pose_grid,
+        goal_xy_grid=goal_xy_grid,
+        d_goal=d_goal,
+        follower=follower,
+    )
+    pivot_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.pivot_turn_speed_scale))))
+    result = follower.pivot_turn(
+        shared_map=shared_map,
+        car_id=car_id,
+        direction_sign=direction_sign,
+        segment_s=float(loop_cfg.pivot_turn_duration_s),
+        speed=pivot_speed,
+        reverse_scale=float(loop_cfg.escape_pivot_reverse_scale),
+        forward_scale=float(loop_cfg.escape_pivot_forward_scale),
+    )
+    _log_drive_status(
+        pose_grid=pose_grid,
+        goal_xy_grid=goal_xy_grid,
+        d_goal=d_goal,
+        dist_cm=ultra_state.dist_cm,
+        ultra_countdown=ultra_state.countdown,
+        path_len=0 if current_path is None else len(current_path.waypoints),
+        target_xy=target_xy,
+        heading_error_deg=heading_error_deg,
+        odom_step_cells=result.forward_step,
+        odom_yaw_deg=math.degrees(result.yaw_delta),
+        odom_steer_deg=result.applied_steer_deg,
+        drive_mode="escape_pivot",
+        drive_speed=pivot_speed,
+        drive_duration_s=float(loop_cfg.pivot_turn_duration_s),
+        prefix="dead_reckon ",
+    )
+
+
+def _maybe_escape_or_continue(
+    *,
+    current_path: Optional[Path],
+    pose_grid: Pose,
+    goal_xy_grid: Tuple[int, int],
+    d_goal: float,
+    ultra_state: UltrasonicState,
+    shared_map: SharedMap,
+    follower: PathFollower,
+    motor: MotorController,
+    loop_cfg: LoopConfig,
+    car_id: int,
+) -> tuple[Optional[Path], bool]:
     if current_path is None or len(current_path.waypoints) < 2:
-        recovered, last_motion_t = _recover_from_stuck(
-            motor=motor,
-            loop_cfg=loop_cfg,
-            latest_ultra_cm=ultra_state.dist_cm,
-            last_motion_t=last_motion_t,
-        )
-        if recovered:
-            _apply_reverse_recovery(
-                shared_map=shared_map,
-                car_id=car_id,
-                motor=motor,
-                loop_cfg=loop_cfg,
-            )
-            ultra_state.countdown = 0
-        else:
-            time.sleep(follower.cfg.dt)
-        return None, last_motion_t, True
-
-    close_obstacle = ultra_state.dist_cm is not None and ultra_state.dist_cm <= loop_cfg.close_obstacle_replan_cm
-    if close_obstacle:
-        recovered, last_motion_t = _recover_from_stuck(
-            motor=motor,
-            loop_cfg=loop_cfg,
-            latest_ultra_cm=ultra_state.dist_cm,
-            last_motion_t=last_motion_t,
-        )
-        if recovered:
-            _apply_reverse_recovery(
-                shared_map=shared_map,
-                car_id=car_id,
-                motor=motor,
-                loop_cfg=loop_cfg,
-            )
-        ultra_state.countdown = 0
-        return None, last_motion_t, True
-
-    if ultra_state.countdown < int(loop_cfg.min_forward_ultra_countdown):
-        motor.stop()
-        _log_drive_status(
+        _run_escape_pivot(
+            current_path=current_path,
             pose_grid=pose_grid,
             goal_xy_grid=goal_xy_grid,
             d_goal=d_goal,
-            dist_cm=ultra_state.dist_cm,
-            ultra_countdown=ultra_state.countdown,
-            path_len=len(current_path.waypoints),
-            target_xy=(pose_grid.x, pose_grid.y),
-            heading_error_deg=0.0,
-            odom_step_cells=0.0,
-            odom_yaw_deg=0.0,
-            odom_steer_deg=0.0,
-            drive_mode="ultra_hold",
-            drive_speed=0,
-            drive_duration_s=0.0,
-            prefix="dead_reckon ",
+            ultra_state=ultra_state,
+            shared_map=shared_map,
+            follower=follower,
+            motor=motor,
+            loop_cfg=loop_cfg,
+            car_id=car_id,
         )
-        time.sleep(max(loop_cfg.pause_after_stop_s, loop_cfg.ultra_timer_period_s))
-        return None, last_motion_t, True
+        return None, True
 
-    return current_path, last_motion_t, False
+    close_obstacle = ultra_state.dist_cm is not None and ultra_state.dist_cm <= loop_cfg.close_obstacle_replan_cm
+    blocked = ultra_state.countdown < int(loop_cfg.min_forward_ultra_countdown)
+    if close_obstacle or blocked:
+        _run_escape_pivot(
+            current_path=current_path,
+            pose_grid=pose_grid,
+            goal_xy_grid=goal_xy_grid,
+            d_goal=d_goal,
+            ultra_state=ultra_state,
+            shared_map=shared_map,
+            follower=follower,
+            motor=motor,
+            loop_cfg=loop_cfg,
+            car_id=car_id,
+        )
+        return None, True
+
+    return current_path, False
 
 
 def _build_drive_command(
@@ -326,7 +332,14 @@ def _build_drive_command(
     drive_duration_s = float(follower.cfg.dt)
     drive_speed = int(motor.cfg.speed)
     drive_mode = "track"
-    if abs(heading_error_deg) >= float(loop_cfg.hard_turn_heading_deg):
+    pivot_direction = 0.0
+    if abs(heading_error_deg) >= float(loop_cfg.pivot_turn_heading_deg):
+        drive_mode = "pivot_turn"
+        drive_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.pivot_turn_speed_scale))))
+        drive_duration_s = float(loop_cfg.pivot_turn_duration_s)
+        steer_deg = float(follower.cfg.max_steer_deg) * (1.0 if heading_error_deg >= 0.0 else -1.0)
+        pivot_direction = 1.0 if heading_error_deg >= 0.0 else -1.0
+    elif abs(heading_error_deg) >= float(loop_cfg.hard_turn_heading_deg):
         drive_duration_s *= float(loop_cfg.hard_turn_duration_scale)
         drive_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.hard_turn_speed_scale))))
         drive_mode = "hard_turn"
@@ -344,6 +357,7 @@ def _build_drive_command(
         drive_mode=drive_mode,
         drive_speed=drive_speed,
         drive_duration_s=drive_duration_s,
+        pivot_direction=pivot_direction,
     )
 
 
@@ -355,6 +369,20 @@ def _apply_drive_command(
     motor: MotorController,
     car_id: int,
 ) -> DriveCommand:
+    if command.drive_mode == "pivot_turn":
+        result = follower.pivot_turn(
+            shared_map=shared_map,
+            car_id=car_id,
+            direction_sign=command.pivot_direction,
+            segment_s=command.drive_duration_s,
+            speed=command.drive_speed,
+        )
+        command.odom_step_cells = result.forward_step
+        command.yaw_delta = result.yaw_delta
+        command.odom_yaw_deg = math.degrees(result.yaw_delta)
+        command.odom_steer_deg = result.applied_steer_deg
+        return command
+
     command.odom_step_cells = estimate_step_cells_for_duration(
         command.drive_duration_s,
         step_seconds=float(motor.cfg.step_seconds),
@@ -440,8 +468,6 @@ def drive_to_goal(
 
     last_ultra_tick_t = 0.0
     t0 = time.time()
-    last_motion_t = t0
-
     follower.reset()
 
     try:
@@ -480,7 +506,7 @@ def drive_to_goal(
                 debug_show_grid=debug_show_grid,
                 car_id=car_id,
             )
-            current_path, last_motion_t, should_continue = _maybe_hold_or_reverse(
+            current_path, should_continue = _maybe_escape_or_continue(
                 current_path=current_path,
                 pose_grid=pose_grid,
                 goal_xy_grid=goal_xy_grid,
@@ -491,7 +517,6 @@ def drive_to_goal(
                 motor=motor,
                 loop_cfg=loop_cfg,
                 car_id=car_id,
-                last_motion_t=last_motion_t,
             )
             if should_continue:
                 continue
@@ -531,8 +556,6 @@ def drive_to_goal(
                 drive_duration_s=command.drive_duration_s,
                 prefix="dead_reckon ",
             )
-            last_motion_t = time.time()
-
     finally:
         motor.stop()
 
