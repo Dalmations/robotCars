@@ -6,7 +6,7 @@ from typing import Optional, Tuple, Literal, List
 
 import numpy as np
 
-from model import Path, Pose, TargetPoint
+from model import Path, TargetPoint
 from coordination.shared_map import SharedMap
 from virtualworld import astar
 
@@ -20,59 +20,8 @@ GridPoint = Tuple[int, int]
 FrameName = Literal["grid", "world"]
 
 
-def wrap_angle(a: float) -> float:
-    while a > math.pi:
-        a -= 2.0 * math.pi
-    while a < -math.pi:
-        a += 2.0 * math.pi
-    return a
-
-
 def clamp(value: float, lo: float, hi: float) -> float:
     return max(float(lo), min(float(hi), float(value)))
-
-
-def estimate_step_cells_for_duration(
-    duration_s: float,
-    *,
-    step_seconds: float,
-    speed: int,
-    speed_ref: int,
-) -> float:
-    base_step = float(duration_s) / float(max(1e-6, step_seconds))
-    speed_ref = max(1.0, float(speed_ref))
-    speed_cmd = float(max(0, min(100, int(speed))))
-    return base_step * (speed_cmd / speed_ref)
-
-
-def estimate_ackermann_yaw_delta(step_cells: float, steer_deg: float, wheelbase: float) -> float:
-    wheelbase = max(1e-6, float(wheelbase))
-    steer_rad = math.radians(float(steer_deg))
-    return float(step_cells) * math.tan(steer_rad) / wheelbase
-
-
-def integrate_dead_reckoning(
-    *,
-    shared_map: SharedMap,
-    car_id: int,
-    forward_step: float,
-    yaw_delta: float,
-) -> Pose:
-    pose_world = shared_map.get_pose(car_id, frame="world")
-    if pose_world is None:
-        pose_world = Pose(0.0, 0.0, 0.0)
-
-    step = float(forward_step)
-    dtheta = float(yaw_delta)
-    theta_mid = float(pose_world.theta) + 0.5 * dtheta
-
-    next_pose = Pose(
-        x=float(pose_world.x + step * math.cos(theta_mid)),
-        y=float(pose_world.y + step * math.sin(theta_mid)),
-        theta=float(wrap_angle(float(pose_world.theta) + dtheta)),
-    )
-    shared_map.set_pose(car_id, next_pose)
-    return next_pose
 
 
 def build_equilateral_triangle_route(start_xy_grid: GridPoint, *, side_cells: int = 6) -> list[GridPoint]:
@@ -159,17 +108,6 @@ class MovementPlanner:
             waypoints = waypoints[: cfg.max_waypoints]
 
         return Path(waypoints=waypoints)
-
-    def is_obstructed(self, path: Path, shared_map: SharedMap) -> bool:
-        cfg = self._cfg()
-        size = self.world_size if self.world_size is not None else getattr(shared_map, "grid").size
-        grid = self._build_grid(shared_map, size=size, cfg=cfg)
-
-        for wp in path.waypoints:
-            x, y = int(round(wp.x)), int(round(wp.y))
-            if 0 <= x < grid.shape[0] and 0 <= y < grid.shape[1] and grid[x, y] == 1:
-                return True
-        return False
 
     def _build_grid(self, shared_map: SharedMap, *, size: tuple[int, int], cfg: PlanningConfig) -> np.ndarray:
         grid = shared_map.to_occupancy_grid(

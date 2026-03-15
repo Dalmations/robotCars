@@ -22,19 +22,24 @@ def read_ultrasonic_cm(motor: Any) -> Optional[float]:
     return d
 
 
-def ultrasonic_to_countdown(dist_cm: Optional[float]) -> int:
+def ultrasonic_to_countdown(
+    dist_cm: Optional[float],
+    *,
+    stop_cm: float = 20.0,
+    caution_cm: float = 40.0,
+) -> int:
     """
     Map the current front clearance into simple safety bands:
-      d > 40cm  -> 30
-      20cm <= d <= 40cm -> 10
-      d < 20cm  -> 1
+      d > caution_cm  -> 30
+      stop_cm <= d <= caution_cm -> 10
+      d < stop_cm  -> 1
     """
     if dist_cm is None:
         return 30
 
     d = float(dist_cm)
-    if d < 20.0:
+    if d < float(stop_cm):
         return 1
-    if d <= 40.0:
+    if d <= float(caution_cm):
         return 10
     return 30

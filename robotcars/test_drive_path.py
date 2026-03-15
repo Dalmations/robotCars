@@ -17,13 +17,15 @@ from car_tools.movement import (
     PlanningConfig,
     build_equilateral_triangle_route,
     clamp,
+)
+from car_tools.motor_controller import MotorController, MotorConfig
+from car_tools.picarx_path_follower import (
+    PathFollower,
+    FollowerConfig,
     estimate_ackermann_yaw_delta,
     estimate_step_cells_for_duration,
     integrate_dead_reckoning,
-    wrap_angle,
 )
-from car_tools.motor_controller import MotorController, MotorConfig
-from car_tools.picarx_path_follower import PathFollower, FollowerConfig
 from model import TargetPoint, Path, Pose
 
 
@@ -33,6 +35,9 @@ class LoopConfig:
     ahead_cm_min: float = 5.0
     ahead_cm_max: float = 120.0
     ultra_timer_period_s: float = 0.1
+    ultra_last_valid_ttl_s: float = 0.35
+    ultra_stop_cm: float = 20.0
+    ultra_caution_cm: float = 40.0
 
     pause_after_stop_s: float = 0.20
     close_obstacle_replan_cm: float = 15.0
@@ -46,18 +51,59 @@ class LoopConfig:
     min_forward_ultra_countdown: int = 10
 
 
+@dataclass
+class UltrasonicState:
+    dist_cm: Optional[float]
+    countdown: int
+    last_valid_cm: Optional[float]
+    last_valid_t: float
+
+
+@dataclass
+class DriveCommand:
+    target_x: float
+    target_y: float
+    heading_error_deg: float
+    steer_deg: float
+    drive_mode: str
+    drive_speed: int
+    drive_duration_s: float
+    odom_step_cells: float = 0.0
+    odom_yaw_deg: float = 0.0
+    odom_steer_deg: float = 0.0
+    yaw_delta: float = 0.0
+
+
 def _tick_ultrasonic(
     *,
     motor: MotorController,
     shared_map: SharedMap,
     loop_cfg: LoopConfig,
+    ultra_state: UltrasonicState,
+    now: float,
     car_id: int,
-) -> tuple[Optional[float], int]:
-    dist_cm = read_ultrasonic_cm(motor)
-    ultra_countdown = ultrasonic_to_countdown(dist_cm)
+) -> UltrasonicState:
+    raw_dist_cm = read_ultrasonic_cm(motor)
+    dist_cm = raw_dist_cm
+    last_valid_cm = ultra_state.last_valid_cm
+    last_valid_t = ultra_state.last_valid_t
+
+    if raw_dist_cm is not None:
+        last_valid_cm = raw_dist_cm
+        last_valid_t = float(now)
+    elif last_valid_cm is not None and (float(now) - float(last_valid_t)) <= float(loop_cfg.ultra_last_valid_ttl_s):
+        dist_cm = last_valid_cm
+    else:
+        dist_cm = None
+
+    ultra_countdown = ultrasonic_to_countdown(
+        dist_cm,
+        stop_cm=float(loop_cfg.ultra_stop_cm),
+        caution_cm=float(loop_cfg.ultra_caution_cm),
+    )
 
     pose_world = shared_map.get_pose(car_id, frame="world")
-    if pose_world is not None:
+    if pose_world is not None and dist_cm is not None:
         shared_map.add_ultra_obstacle(
             pose_world=pose_world,
             dist_cm=dist_cm,
@@ -66,7 +112,26 @@ def _tick_ultrasonic(
             ahead_cm_max=loop_cfg.ahead_cm_max,
         )
 
-    return dist_cm, ultra_countdown
+    return UltrasonicState(
+        dist_cm=dist_cm,
+        countdown=ultra_countdown,
+        last_valid_cm=last_valid_cm,
+        last_valid_t=last_valid_t,
+    )
+
+
+def _ensure_pose(*, shared_map: SharedMap, car_id: int) -> Optional[Pose]:
+    pose_grid = shared_map.get_pose(car_id, frame="grid")
+    if pose_grid is not None:
+        return pose_grid
+
+    integrate_dead_reckoning(
+        shared_map=shared_map,
+        car_id=car_id,
+        forward_step=0.0,
+        yaw_delta=0.0,
+    )
+    return shared_map.get_pose(car_id, frame="grid")
 
 
 def _show_grid_debug_frame(
@@ -109,6 +174,26 @@ def _plan_goal_path(
     return path
 
 
+def _ensure_path(
+    *,
+    current_path: Optional[Path],
+    planner: MovementPlanner,
+    shared_map: SharedMap,
+    goal_target: TargetPoint,
+    debug_show_grid: bool,
+    car_id: int,
+) -> Optional[Path]:
+    if current_path is not None:
+        return current_path
+    return _plan_goal_path(
+        planner=planner,
+        shared_map=shared_map,
+        goal_target=goal_target,
+        debug_show_grid=debug_show_grid,
+        car_id=car_id,
+    )
+
+
 def _recover_from_stuck(
     *,
     motor: MotorController,
@@ -130,9 +215,174 @@ def _recover_from_stuck(
     return False, last_motion_t
 
 
+def _apply_reverse_recovery(
+    *,
+    shared_map: SharedMap,
+    car_id: int,
+    motor: MotorController,
+    loop_cfg: LoopConfig,
+) -> None:
+    reverse_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.stuck_reverse_speed_scale))))
+    integrate_dead_reckoning(
+        shared_map=shared_map,
+        car_id=car_id,
+        forward_step=-estimate_step_cells_for_duration(
+            loop_cfg.stuck_reverse_s,
+            step_seconds=float(motor.cfg.step_seconds),
+            speed=reverse_speed,
+            speed_ref=int(motor.cfg.speed),
+        ),
+        yaw_delta=0.0,
+    )
+
+
+def _maybe_hold_or_reverse(
+    *,
+    current_path: Optional[Path],
+    pose_grid: Pose,
+    goal_xy_grid: Tuple[int, int],
+    d_goal: float,
+    ultra_state: UltrasonicState,
+    shared_map: SharedMap,
+    follower: PathFollower,
+    motor: MotorController,
+    loop_cfg: LoopConfig,
+    car_id: int,
+    last_motion_t: float,
+) -> tuple[Optional[Path], float, bool]:
+    if current_path is None or len(current_path.waypoints) < 2:
+        recovered, last_motion_t = _recover_from_stuck(
+            motor=motor,
+            loop_cfg=loop_cfg,
+            latest_ultra_cm=ultra_state.dist_cm,
+            last_motion_t=last_motion_t,
+        )
+        if recovered:
+            _apply_reverse_recovery(
+                shared_map=shared_map,
+                car_id=car_id,
+                motor=motor,
+                loop_cfg=loop_cfg,
+            )
+            ultra_state.countdown = 0
+        else:
+            time.sleep(follower.cfg.dt)
+        return None, last_motion_t, True
+
+    close_obstacle = ultra_state.dist_cm is not None and ultra_state.dist_cm <= loop_cfg.close_obstacle_replan_cm
+    if close_obstacle:
+        recovered, last_motion_t = _recover_from_stuck(
+            motor=motor,
+            loop_cfg=loop_cfg,
+            latest_ultra_cm=ultra_state.dist_cm,
+            last_motion_t=last_motion_t,
+        )
+        if recovered:
+            _apply_reverse_recovery(
+                shared_map=shared_map,
+                car_id=car_id,
+                motor=motor,
+                loop_cfg=loop_cfg,
+            )
+        ultra_state.countdown = 0
+        return None, last_motion_t, True
+
+    if ultra_state.countdown < int(loop_cfg.min_forward_ultra_countdown):
+        motor.stop()
+        _log_drive_status(
+            pose_grid=pose_grid,
+            goal_xy_grid=goal_xy_grid,
+            d_goal=d_goal,
+            dist_cm=ultra_state.dist_cm,
+            ultra_countdown=ultra_state.countdown,
+            path_len=len(current_path.waypoints),
+            target_xy=(pose_grid.x, pose_grid.y),
+            heading_error_deg=0.0,
+            odom_step_cells=0.0,
+            odom_yaw_deg=0.0,
+            odom_steer_deg=0.0,
+            drive_mode="ultra_hold",
+            drive_speed=0,
+            drive_duration_s=0.0,
+            prefix="dead_reckon ",
+        )
+        time.sleep(max(loop_cfg.pause_after_stop_s, loop_cfg.ultra_timer_period_s))
+        return None, last_motion_t, True
+
+    return current_path, last_motion_t, False
+
+
+def _build_drive_command(
+    *,
+    current_path: Path,
+    pose_grid: Pose,
+    d_goal: float,
+    follower: PathFollower,
+    motor: MotorController,
+    loop_cfg: LoopConfig,
+) -> DriveCommand:
+    target_x, target_y, heading_error_deg, steer_deg = follower.tracking_command(current_path, pose_grid, d_goal)
+
+    drive_duration_s = float(follower.cfg.dt)
+    drive_speed = int(motor.cfg.speed)
+    drive_mode = "track"
+    if abs(heading_error_deg) >= float(loop_cfg.hard_turn_heading_deg):
+        drive_duration_s *= float(loop_cfg.hard_turn_duration_scale)
+        drive_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.hard_turn_speed_scale))))
+        drive_mode = "hard_turn"
+        steer_deg = clamp(
+            float(loop_cfg.heading_steer_gain) * float(heading_error_deg),
+            -float(follower.cfg.max_steer_deg),
+            float(follower.cfg.max_steer_deg),
+        )
+
+    return DriveCommand(
+        target_x=target_x,
+        target_y=target_y,
+        heading_error_deg=heading_error_deg,
+        steer_deg=steer_deg,
+        drive_mode=drive_mode,
+        drive_speed=drive_speed,
+        drive_duration_s=drive_duration_s,
+    )
+
+
+def _apply_drive_command(
+    *,
+    command: DriveCommand,
+    shared_map: SharedMap,
+    follower: PathFollower,
+    motor: MotorController,
+    car_id: int,
+) -> DriveCommand:
+    command.odom_step_cells = estimate_step_cells_for_duration(
+        command.drive_duration_s,
+        step_seconds=float(motor.cfg.step_seconds),
+        speed=command.drive_speed,
+        speed_ref=int(motor.cfg.speed),
+    )
+    motor.set_steering(command.steer_deg)
+    command.odom_steer_deg = motor.get_applied_steering_deg()
+    command.yaw_delta = estimate_ackermann_yaw_delta(
+        command.odom_step_cells,
+        command.odom_steer_deg,
+        float(follower.cfg.wheelbase),
+    )
+    command.odom_yaw_deg = math.degrees(command.yaw_delta)
+
+    motor.forward_for(command.drive_duration_s, speed=command.drive_speed)
+    integrate_dead_reckoning(
+        shared_map=shared_map,
+        car_id=car_id,
+        forward_step=command.odom_step_cells,
+        yaw_delta=command.yaw_delta,
+    )
+    return command
+
+
 def _log_drive_status(
     *,
-    pose_grid,
+    pose_grid: Pose,
     goal_xy_grid: Tuple[int, int],
     d_goal: float,
     dist_cm: Optional[float],
@@ -177,8 +427,16 @@ def drive_to_goal(
     goal_target = TargetPoint(float(goal_xy_grid[0]), float(goal_xy_grid[1]))
 
     current_path: Optional[Path] = None
-    latest_ultra_cm: Optional[float] = None
-    ultra_countdown = ultrasonic_to_countdown(None)
+    ultra_state = UltrasonicState(
+        dist_cm=None,
+        countdown=ultrasonic_to_countdown(
+            None,
+            stop_cm=float(loop_cfg.ultra_stop_cm),
+            caution_cm=float(loop_cfg.ultra_caution_cm),
+        ),
+        last_valid_cm=None,
+        last_valid_t=0.0,
+    )
 
     last_ultra_tick_t = 0.0
     t0 = time.time()
@@ -192,26 +450,20 @@ def drive_to_goal(
             # Check ultrasonic every ultra_timer_period_s
             if (now - last_ultra_tick_t) >= loop_cfg.ultra_timer_period_s:
                 last_ultra_tick_t = now
-                latest_ultra_cm, ultra_countdown = _tick_ultrasonic(
+                ultra_state = _tick_ultrasonic(
                     motor=motor,
                     shared_map=shared_map,
                     loop_cfg=loop_cfg,
+                    ultra_state=ultra_state,
+                    now=now,
                     car_id=car_id,
                 )
 
-            pose_grid = shared_map.get_pose(car_id, frame="grid")
+            pose_grid = _ensure_pose(shared_map=shared_map, car_id=car_id)
             if pose_grid is None:
-                integrate_dead_reckoning(
-                    shared_map=shared_map,
-                    car_id=car_id,
-                    forward_step=0.0,
-                    yaw_delta=0.0,
-                )
-                pose_grid = shared_map.get_pose(car_id, frame="grid")
-                if pose_grid is None:
-                    motor.stop()
-                    time.sleep(follower.cfg.dt)
-                    continue
+                motor.stop()
+                time.sleep(follower.cfg.dt)
+                continue
             
             # Compute distance to goal
             d_goal = math.hypot(goal_xy_grid[0] - pose_grid.x, goal_xy_grid[1] - pose_grid.y)
@@ -220,148 +472,64 @@ def drive_to_goal(
                 motor.mark_reached()
                 return True
 
-            if current_path is None:
-                current_path = _plan_goal_path(
-                    planner=planner,
-                    shared_map=shared_map,
-                    goal_target=goal_target,
-                    debug_show_grid=debug_show_grid,
-                    car_id=car_id,
-                )
-
-            if current_path is None or len(current_path.waypoints) < 2:
-                current_path = None
-                recovered, last_motion_t = _recover_from_stuck(
-                    motor=motor,
-                    loop_cfg=loop_cfg,
-                    latest_ultra_cm=latest_ultra_cm,
-                    last_motion_t=last_motion_t,
-                )
-                if recovered:
-                    reverse_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.stuck_reverse_speed_scale))))
-                    integrate_dead_reckoning(
-                        shared_map=shared_map,
-                        car_id=car_id,
-                        forward_step=-estimate_step_cells_for_duration(
-                            loop_cfg.stuck_reverse_s,
-                            step_seconds=float(motor.cfg.step_seconds),
-                            speed=reverse_speed,
-                            speed_ref=int(motor.cfg.speed),
-                        ),
-                        yaw_delta=0.0,
-                    )
-                    ultra_countdown = 0
-                    continue
-                time.sleep(follower.cfg.dt)
-                continue
-
-            close_obstacle = latest_ultra_cm is not None and latest_ultra_cm <= loop_cfg.close_obstacle_replan_cm
-            if close_obstacle:
-                current_path = None
-                recovered, last_motion_t = _recover_from_stuck(
-                    motor=motor,
-                    loop_cfg=loop_cfg,
-                    latest_ultra_cm=latest_ultra_cm,
-                    last_motion_t=last_motion_t,
-                )
-                if recovered:
-                    reverse_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.stuck_reverse_speed_scale))))
-                    integrate_dead_reckoning(
-                        shared_map=shared_map,
-                        car_id=car_id,
-                        forward_step=-estimate_step_cells_for_duration(
-                            loop_cfg.stuck_reverse_s,
-                            step_seconds=float(motor.cfg.step_seconds),
-                            speed=reverse_speed,
-                            speed_ref=int(motor.cfg.speed),
-                        ),
-                        yaw_delta=0.0,
-                    )
-                ultra_countdown = 0
-                continue
-
-            if ultra_countdown < int(loop_cfg.min_forward_ultra_countdown):
-                hold_path_len = len(current_path.waypoints) if current_path is not None else 0
-                motor.stop()
-                current_path = None
-                _log_drive_status(
-                    pose_grid=pose_grid,
-                    goal_xy_grid=goal_xy_grid,
-                    d_goal=d_goal,
-                    dist_cm=latest_ultra_cm,
-                    ultra_countdown=ultra_countdown,
-                    path_len=hold_path_len,
-                    target_xy=(pose_grid.x, pose_grid.y),
-                    heading_error_deg=0.0,
-                    odom_step_cells=0.0,
-                    odom_yaw_deg=0.0,
-                    odom_steer_deg=0.0,
-                    drive_mode="ultra_hold",
-                    drive_speed=0,
-                    drive_duration_s=0.0,
-                    prefix="dead_reckon ",
-                )
-                time.sleep(max(loop_cfg.pause_after_stop_s, loop_cfg.ultra_timer_period_s))
-                continue
-
-            lookahead = follower.compute_lookahead(d_goal)
-            target_x, target_y = follower.lookahead_point(current_path, pose_grid, lookahead)
-            heading_error_deg = math.degrees(
-                wrap_angle(math.atan2(target_y - pose_grid.y, target_x - pose_grid.x) - pose_grid.theta)
+            current_path = _ensure_path(
+                current_path=current_path,
+                planner=planner,
+                shared_map=shared_map,
+                goal_target=goal_target,
+                debug_show_grid=debug_show_grid,
+                car_id=car_id,
             )
+            current_path, last_motion_t, should_continue = _maybe_hold_or_reverse(
+                current_path=current_path,
+                pose_grid=pose_grid,
+                goal_xy_grid=goal_xy_grid,
+                d_goal=d_goal,
+                ultra_state=ultra_state,
+                shared_map=shared_map,
+                follower=follower,
+                motor=motor,
+                loop_cfg=loop_cfg,
+                car_id=car_id,
+                last_motion_t=last_motion_t,
+            )
+            if should_continue:
+                continue
+
+            assert current_path is not None
             path_len = len(current_path.waypoints) if current_path is not None else 0
-            steer_deg = follower.steering_command(current_path, pose_grid, d_goal)
-
-            drive_duration_s = float(follower.cfg.dt)
-            drive_speed = int(motor.cfg.speed)
-            drive_mode = "track"
-            if abs(heading_error_deg) >= float(loop_cfg.hard_turn_heading_deg):
-                drive_duration_s *= float(loop_cfg.hard_turn_duration_scale)
-                drive_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.hard_turn_speed_scale))))
-                drive_mode = "hard_turn"
-                steer_deg = clamp(
-                    float(loop_cfg.heading_steer_gain) * float(heading_error_deg),
-                    -float(follower.cfg.max_steer_deg),
-                    float(follower.cfg.max_steer_deg),
-                )
-
-            step_cells = estimate_step_cells_for_duration(
-                drive_duration_s,
-                step_seconds=float(motor.cfg.step_seconds),
-                speed=drive_speed,
-                speed_ref=int(motor.cfg.speed),
+            command = _build_drive_command(
+                current_path=current_path,
+                pose_grid=pose_grid,
+                d_goal=d_goal,
+                follower=follower,
+                motor=motor,
+                loop_cfg=loop_cfg,
             )
-            motor.set_steering(steer_deg)
-            applied_steer_deg = motor.get_applied_steering_deg()
-            expected_yaw_deg = math.degrees(
-                estimate_ackermann_yaw_delta(step_cells, applied_steer_deg, float(follower.cfg.wheelbase))
+            command = _apply_drive_command(
+                command=command,
+                shared_map=shared_map,
+                follower=follower,
+                motor=motor,
+                car_id=car_id,
             )
 
             _log_drive_status(
                 pose_grid=pose_grid,
                 goal_xy_grid=goal_xy_grid,
                 d_goal=d_goal,
-                dist_cm=latest_ultra_cm,
-                ultra_countdown=ultra_countdown,
+                dist_cm=ultra_state.dist_cm,
+                ultra_countdown=ultra_state.countdown,
                 path_len=path_len,
-                target_xy=(target_x, target_y),
-                heading_error_deg=heading_error_deg,
-                odom_step_cells=step_cells,
-                odom_yaw_deg=expected_yaw_deg,
-                odom_steer_deg=applied_steer_deg,
-                drive_mode=drive_mode,
-                drive_speed=drive_speed,
-                drive_duration_s=drive_duration_s,
+                target_xy=(command.target_x, command.target_y),
+                heading_error_deg=command.heading_error_deg,
+                odom_step_cells=command.odom_step_cells,
+                odom_yaw_deg=command.odom_yaw_deg,
+                odom_steer_deg=command.odom_steer_deg,
+                drive_mode=command.drive_mode,
+                drive_speed=command.drive_speed,
+                drive_duration_s=command.drive_duration_s,
                 prefix="dead_reckon ",
-            )
-
-            motor.forward_for(drive_duration_s, speed=drive_speed)
-            yaw_delta = estimate_ackermann_yaw_delta(step_cells, applied_steer_deg, float(follower.cfg.wheelbase))
-            integrate_dead_reckoning(
-                shared_map=shared_map,
-                car_id=car_id,
-                forward_step=step_cells,
-                yaw_delta=yaw_delta,
             )
             last_motion_t = time.time()
 
@@ -392,7 +560,6 @@ def main() -> None:
         lookahead=8.0,
         wheelbase=2.2,
         goal_tolerance=1.25,
-        pose_frame="grid",
         steer_sign=1.0,
         max_steer_deg=motor.cfg.max_steer_deg,
         steer_alpha=0.25,
