@@ -16,6 +16,7 @@ from car_tools.movement import (
     MovementPlanner,
     PlanningConfig,
     build_equilateral_triangle_route,
+    build_square_route,
     clamp,
 )
 from car_tools.motor_controller import MotorController, MotorConfig
@@ -613,7 +614,8 @@ def main() -> None:
 
     try:
         start_grid = shared_map.get_car_grid_position(0)
-        route = build_equilateral_triangle_route(start_grid, side_cells=6)
+        # route = build_equilateral_triangle_route(start_grid, side_cells=6)
+        route = build_square_route(start_grid, side_cells=6)
         print("Drive route:", route)
         for goal in route[1:]:
             ok = drive_to_goal(
