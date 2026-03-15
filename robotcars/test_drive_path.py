@@ -8,8 +8,6 @@ from typing import Optional, Tuple
 import cv2
 
 from car_tools.camera_input import (
-    PiCarXCamera,
-    CameraConfig,
     read_ultrasonic_cm,
     ultrasonic_to_countdown,
 )
@@ -17,8 +15,7 @@ from coordination.shared_map import SharedMap
 from car_tools.movement import MovementPlanner, PlanningConfig
 from car_tools.motor_controller import MotorController, MotorConfig
 from car_tools.picarx_path_follower import PathFollower, FollowerConfig
-from car_tools.obstacle_detection import MonocularVSLAM, CameraIntrinsics, VslamConfig, VslamStatus
-from model import TargetPoint, Path
+from model import TargetPoint, Path, Pose
 
 
 @dataclass
@@ -28,20 +25,11 @@ class LoopConfig:
     ahead_cm_max: float = 120.0
     ultra_timer_period_s: float = 0.1
 
-    min_pose_conf_for_replan: float = 0.55
-    blurry_hold_pause_s: float = 0.20
+    pause_after_stop_s: float = 0.20
     close_obstacle_replan_cm: float = 15.0
-    weak_pose_replan_countdown: int = 3
     stuck_timeout_s: float = 3.0
     stuck_reverse_s: float = 0.30
     stuck_reverse_speed_scale: float = 0.6
-
-
-@dataclass
-class PendingOdom:
-    step_cells: float = 0.0
-    yaw_delta: float = 0.0
-    steer_deg: float = 0.0
 
 
 def _estimate_translation_step_cells_for_duration(
@@ -64,6 +52,38 @@ def _estimate_ackermann_yaw_delta(step_cells: float, steer_deg: float, follower:
     wheelbase = max(1e-6, float(follower.cfg.wheelbase))
     steer_rad = math.radians(float(steer_deg))
     return float(step_cells) * math.tan(steer_rad) / wheelbase
+
+
+def _wrap_angle(a: float) -> float:
+    while a > math.pi:
+        a -= 2.0 * math.pi
+    while a < -math.pi:
+        a += 2.0 * math.pi
+    return a
+
+
+def _integrate_dead_reckoning(
+    *,
+    shared_map: SharedMap,
+    car_id: int,
+    forward_step: float,
+    yaw_delta: float,
+) -> Pose:
+    pose_world = shared_map.get_pose(car_id, frame="world")
+    if pose_world is None:
+        pose_world = Pose(0.0, 0.0, 0.0)
+
+    step = float(forward_step)
+    dtheta = float(yaw_delta)
+    theta_mid = float(pose_world.theta) + 0.5 * dtheta
+
+    next_pose = Pose(
+        x=float(pose_world.x + step * math.cos(theta_mid)),
+        y=float(pose_world.y + step * math.sin(theta_mid)),
+        theta=float(_wrap_angle(float(pose_world.theta) + dtheta)),
+    )
+    shared_map.set_pose(car_id, next_pose)
+    return next_pose
 
 
 def _tick_ultrasonic(
@@ -91,15 +111,6 @@ def _tick_ultrasonic(
     return dist_cm, ultra_countdown
 
 
-def _show_slam_debug_frame(slam: MonocularVSLAM) -> None:
-    # frame = slam.get_debug_matches_frame()
-    frame = slam.get_debug_keypoints_frame()
-    if frame is None:
-        return
-    cv2.imshow("SLAM debug", frame)
-    cv2.waitKey(1)
-
-
 def _show_grid_debug_frame(
     *,
     shared_map: SharedMap,
@@ -122,7 +133,7 @@ def _plan_goal_path(
     planner: MovementPlanner,
     shared_map: SharedMap,
     goal_target: TargetPoint,
-    debug_show_keypoints: bool,
+    debug_show_grid: bool,
     car_id: int,
 ) -> Path:
     path = planner.plan_to_target(
@@ -130,7 +141,7 @@ def _plan_goal_path(
         shared_map=shared_map,
         target_frame="grid",
     )
-    if debug_show_keypoints:
+    if debug_show_grid:
         _show_grid_debug_frame(
             shared_map=shared_map,
             current_path=path,
@@ -157,7 +168,7 @@ def _recover_from_stuck(
         motor.stop()
         return True, time.time()
 
-    time.sleep(max(0.01, loop_cfg.blurry_hold_pause_s))
+    time.sleep(max(0.01, loop_cfg.pause_after_stop_s))
     return False, last_motion_t
 
 
@@ -168,11 +179,9 @@ def _log_drive_status(
     d_goal: float,
     dist_cm: Optional[float],
     ultra_countdown: int,
-    pose_conf: float,
-    pose_inliers: int,
-    pose_blurry: bool,
-    pose_contrast: float,
-    slam_status: VslamStatus,
+    path_len: int,
+    target_xy: Tuple[float, float],
+    heading_error_deg: float,
     odom_step_cells: float,
     odom_yaw_deg: float,
     odom_steer_deg: float,
@@ -184,17 +193,9 @@ def _log_drive_status(
         f"pose_g=({pose_grid.x:.1f},{pose_grid.y:.1f},{pose_grid.theta:.2f}) "
         f"goal=({goal_xy_grid[0]},{goal_xy_grid[1]}) d={d_goal:.1f} "
         f"ultra={ultra_str} ultra_countdown={ultra_countdown} "
-        f"pose_conf={pose_conf:.2f} inliers={pose_inliers} blurry={pose_blurry} "
-        f"ctr={pose_contrast:.1f} "
+        f"path_n={path_len} target=({target_xy[0]:.1f},{target_xy[1]:.1f}) "
+        f"head_err={heading_error_deg:.1f} "
         f"odom_step={odom_step_cells:.2f} odom_yaw={odom_yaw_deg:.1f} steer={odom_steer_deg:.1f} "
-        f"slam_gate={slam_status.gate_reason} feat={slam_status.feature_count} "
-        f"match={slam_status.match_count}/{slam_status.kept_match_count} "
-        f"e_inl={slam_status.essential_inlier_count} pose_inl={slam_status.recover_pose_count} "
-        f"flow={slam_status.median_flow_px:.2f} "
-        f"frame_d={slam_status.frame_delta_mean:.2f} cov={slam_status.inlier_coverage:.3f} "
-        f"step={slam_status.requested_step:.2f}->{slam_status.applied_step:.2f} "
-        f"rot={slam_status.rotation_deg:.1f} trans={int(slam_status.translation_enabled)} "
-        f"raw_th={slam_status.raw_pose_theta:.2f} filt_th={slam_status.filtered_pose_theta:.2f}"
     )
 
 
@@ -205,12 +206,10 @@ def drive_to_goal(
     planner: MovementPlanner,
     follower: PathFollower,
     motor: MotorController,
-    slam: MonocularVSLAM,
-    camera: PiCarXCamera,
     loop_cfg: LoopConfig,
     car_id: int = 0,
     timeout_s: float = 180.0,
-    debug_show_keypoints: bool = False,
+    debug_show_grid: bool = False,
 ) -> bool:
     goal_xy_grid = (int(goal_xy_grid[0]), int(goal_xy_grid[1]))
     goal_target = TargetPoint(float(goal_xy_grid[0]), float(goal_xy_grid[1]))
@@ -222,7 +221,6 @@ def drive_to_goal(
     last_ultra_tick_t = 0.0
     t0 = time.time()
     last_motion_t = t0
-    pending_odom = PendingOdom()
 
     follower.reset()
 
@@ -240,29 +238,19 @@ def drive_to_goal(
                     car_id=car_id,
                 )
 
-            # Read camera cosntantly and tick slam with output
-            frame = camera.read()
-            if frame is None:
-                motor.stop()
-                time.sleep(0.05)
-                continue
-
-            odom_used = pending_odom
-            pending_odom = PendingOdom()
-            slam.tick(
-                frame,
-                translation_step=odom_used.step_cells,
-                odom_yaw_delta=odom_used.yaw_delta,
-            )
-
-            if debug_show_keypoints:
-                _show_slam_debug_frame(slam)
-
             pose_grid = shared_map.get_pose(car_id, frame="grid")
             if pose_grid is None:
-                motor.stop()
-                time.sleep(follower.cfg.dt)
-                continue
+                _integrate_dead_reckoning(
+                    shared_map=shared_map,
+                    car_id=car_id,
+                    forward_step=0.0,
+                    yaw_delta=0.0,
+                )
+                pose_grid = shared_map.get_pose(car_id, frame="grid")
+                if pose_grid is None:
+                    motor.stop()
+                    time.sleep(follower.cfg.dt)
+                    continue
             
             # Compute distance to goal
             d_goal = math.hypot(goal_xy_grid[0] - pose_grid.x, goal_xy_grid[1] - pose_grid.y)
@@ -271,78 +259,19 @@ def drive_to_goal(
                 motor.mark_reached()
                 return True
 
-            # Check quality of slam frames
-            slam_status = slam.get_status()
-            pose_conf, pose_high_conf, pose_blurry, pose_inliers, pose_contrast = slam.slam_quality(
-                min_confidence=loop_cfg.min_pose_conf_for_replan
-            )
-            _log_drive_status(
-                pose_grid=pose_grid,
-                goal_xy_grid=goal_xy_grid,
-                d_goal=d_goal,
-                dist_cm=latest_ultra_cm,
-                ultra_countdown=ultra_countdown,
-                pose_conf=pose_conf,
-                pose_inliers=pose_inliers,
-                pose_blurry=pose_blurry,
-                pose_contrast=pose_contrast,
-                slam_status=slam_status,
-                odom_step_cells=odom_used.step_cells,
-                odom_yaw_deg=math.degrees(odom_used.yaw_delta),
-                odom_steer_deg=odom_used.steer_deg,
-                prefix="hold=pose_recovery ",
-                )
-
-            # If a blurry and low confidence frame, stop to capture a better frame.
-            if current_path is not None and pose_blurry and not pose_high_conf:
-                motor.stop()
-                time.sleep(max(0.01, loop_cfg.blurry_hold_pause_s))
-                continue
-            
             path_blocked = current_path is not None and planner.is_obstructed(current_path, shared_map)
 
             # Recalculate when bootstrapping, when the ultrasonic demands it, or when the path is now blocked.
             needs_path = current_path is None or ultra_countdown <= 0 or path_blocked
             if needs_path:
-                close_obstacle = latest_ultra_cm is not None and latest_ultra_cm <= loop_cfg.close_obstacle_replan_cm
-                allow_weak_pose_replan = ultra_countdown <= 0 and close_obstacle
-
-                if current_path is None or pose_high_conf or allow_weak_pose_replan:
-                    current_path = _plan_goal_path(
-                        planner=planner,
-                        shared_map=shared_map,
-                        goal_target=goal_target,
-                        debug_show_keypoints=debug_show_keypoints,
-                        car_id=car_id,
-                    )
-                    if allow_weak_pose_replan and not pose_high_conf:
-                        ultra_countdown = max(
-                            int(loop_cfg.weak_pose_replan_countdown),
-                            ultrasonic_to_countdown(latest_ultra_cm),
-                        )
-                    else:
-                        ultra_countdown = max(1, ultrasonic_to_countdown(latest_ultra_cm))
-                else:
-                    recovered, last_motion_t = _recover_from_stuck(
-                        motor=motor,
-                        loop_cfg=loop_cfg,
-                        latest_ultra_cm=latest_ultra_cm,
-                        last_motion_t=last_motion_t,
-                    )
-                    if recovered:
-                        reverse_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.stuck_reverse_speed_scale))))
-                        pending_odom = PendingOdom(
-                            step_cells=-_estimate_translation_step_cells_for_duration(
-                                loop_cfg.stuck_reverse_s,
-                                motor,
-                                speed=reverse_speed,
-                            ),
-                            yaw_delta=0.0,
-                            steer_deg=0.0,
-                        )
-                        current_path = None
-                        ultra_countdown = 0
-                    continue
+                current_path = _plan_goal_path(
+                    planner=planner,
+                    shared_map=shared_map,
+                    goal_target=goal_target,
+                    debug_show_grid=debug_show_grid,
+                    car_id=car_id,
+                )
+                ultra_countdown = max(1, ultrasonic_to_countdown(latest_ultra_cm))
 
             if current_path is None or len(current_path.waypoints) < 2:
                 current_path = None
@@ -354,30 +283,79 @@ def drive_to_goal(
                 )
                 if recovered:
                     reverse_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.stuck_reverse_speed_scale))))
-                    pending_odom = PendingOdom(
-                        step_cells=-_estimate_translation_step_cells_for_duration(
+                    _integrate_dead_reckoning(
+                        shared_map=shared_map,
+                        car_id=car_id,
+                        forward_step=-_estimate_translation_step_cells_for_duration(
                             loop_cfg.stuck_reverse_s,
                             motor,
                             speed=reverse_speed,
                         ),
                         yaw_delta=0.0,
-                        steer_deg=0.0,
                     )
                     ultra_countdown = 0
                     continue
                 time.sleep(follower.cfg.dt)
                 continue
-            
-            # Set steering
+
+            close_obstacle = latest_ultra_cm is not None and latest_ultra_cm <= loop_cfg.close_obstacle_replan_cm
+            if close_obstacle:
+                current_path = None
+                recovered, last_motion_t = _recover_from_stuck(
+                    motor=motor,
+                    loop_cfg=loop_cfg,
+                    latest_ultra_cm=latest_ultra_cm,
+                    last_motion_t=last_motion_t,
+                )
+                if recovered:
+                    reverse_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.stuck_reverse_speed_scale))))
+                    _integrate_dead_reckoning(
+                        shared_map=shared_map,
+                        car_id=car_id,
+                        forward_step=-_estimate_translation_step_cells_for_duration(
+                            loop_cfg.stuck_reverse_s,
+                            motor,
+                            speed=reverse_speed,
+                        ),
+                        yaw_delta=0.0,
+                    )
+                ultra_countdown = 0
+                continue
+
             steer_deg = follower.steering_command(current_path, pose_grid, d_goal)
+            lookahead = follower.compute_lookahead(d_goal)
+            target_x, target_y = follower.lookahead_point(current_path, pose_grid, lookahead)
+            heading_error_deg = math.degrees(
+                _wrap_angle(math.atan2(target_y - pose_grid.y, target_x - pose_grid.x) - pose_grid.theta)
+            )
+            path_len = len(current_path.waypoints) if current_path is not None else 0
+            step_cells = _estimate_translation_step_cells(follower, motor)
             motor.set_steering(steer_deg)
             applied_steer_deg = motor.get_applied_steering_deg()
+            expected_yaw_deg = math.degrees(_estimate_ackermann_yaw_delta(step_cells, applied_steer_deg, follower))
+
+            _log_drive_status(
+                pose_grid=pose_grid,
+                goal_xy_grid=goal_xy_grid,
+                d_goal=d_goal,
+                dist_cm=latest_ultra_cm,
+                ultra_countdown=ultra_countdown,
+                path_len=path_len,
+                target_xy=(target_x, target_y),
+                heading_error_deg=heading_error_deg,
+                odom_step_cells=step_cells,
+                odom_yaw_deg=expected_yaw_deg,
+                odom_steer_deg=applied_steer_deg,
+                prefix="dead_reckon ",
+            )
+
             motor.forward_for(follower.cfg.dt, speed=int(motor.cfg.speed))
-            step_cells = _estimate_translation_step_cells(follower, motor)
-            pending_odom = PendingOdom(
-                step_cells=step_cells,
-                yaw_delta=_estimate_ackermann_yaw_delta(step_cells, applied_steer_deg, follower),
-                steer_deg=applied_steer_deg,
+            yaw_delta = _estimate_ackermann_yaw_delta(step_cells, applied_steer_deg, follower)
+            _integrate_dead_reckoning(
+                shared_map=shared_map,
+                car_id=car_id,
+                forward_step=step_cells,
+                yaw_delta=yaw_delta,
             )
             last_motion_t = time.time()
 
@@ -390,33 +368,7 @@ def drive_to_goal(
 def main() -> None:
     shared_map = SharedMap()
     shared_map.configure_grid(size=(50, 50), resolution=1.0, origin_world=(-7.0, -7.0))
-
-    cam = PiCarXCamera(CameraConfig(
-        display_local=False,
-        display_web=False,
-        frame_size=(640, 480),
-        frame_rate=30,
-        camera_controls={"Saturation": 0.80},
-    ))
-    cam.start()
-
-    intr = CameraIntrinsics(fx=520.0, fy=520.0, cx=320.0, cy=240.0)
-    slam = MonocularVSLAM(
-        intr,
-        shared_map,
-        car_id=0,
-        cfg=VslamConfig(
-            debug_draw_keypoints=True,
-            debug_draw_matches=True,
-            translation_step=0.2,
-            forward_sign=1.0,
-            pose_ema_alpha=0.25,
-            gray_use_clahe=True,
-            gray_clahe_clip_limit=2.5,
-            gray_clahe_tile_size=8,
-            auto_white_balance=True,
-        ),
-    )
+    shared_map.set_pose(0, Pose(0.0, 0.0, 0.0))
 
     motor = MotorController(MotorConfig(
         speed=26,
@@ -460,34 +412,24 @@ def main() -> None:
     )
 
     try:
-        t_warm = time.time()
-        while time.time() - t_warm < 1.0:
-            frame = cam.read()
-            if frame is not None:
-                slam.tick(frame, translation_step=0.0)
-            time.sleep(0.02)
-
-        square = [(10, 10), (5, 10), (5, 5), (10, 5), (10, 10)]
-        print("Drive square:", square)
-        for goal in square[1:]:
+        route = [(10, 10), (5, 10), (5, 5), (10, 5), (10, 10)]
+        print("Drive route:", route)
+        for goal in route[1:]:
             ok = drive_to_goal(
                 goal,
                 shared_map=shared_map,
                 planner=planner,
                 follower=follower,
                 motor=motor,
-                slam=slam,
-                camera=cam,
                 loop_cfg=loop_cfg,
                 timeout_s=180.0,
-                debug_show_keypoints=True,
+                debug_show_grid=True,
             )
             print(f"Reached {goal}:", ok)
             time.sleep(0.5)
 
     finally:
         motor.stop()
-        cam.stop()
         try:
             cv2.destroyAllWindows()
         except Exception:
