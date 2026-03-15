@@ -12,7 +12,16 @@ from car_tools.camera_input import (
     ultrasonic_to_countdown,
 )
 from coordination.shared_map import SharedMap
-from car_tools.movement import MovementPlanner, PlanningConfig
+from car_tools.movement import (
+    MovementPlanner,
+    PlanningConfig,
+    build_equilateral_triangle_route,
+    clamp,
+    estimate_ackermann_yaw_delta,
+    estimate_step_cells_for_duration,
+    integrate_dead_reckoning,
+    wrap_angle,
+)
 from car_tools.motor_controller import MotorController, MotorConfig
 from car_tools.picarx_path_follower import PathFollower, FollowerConfig
 from model import TargetPoint, Path, Pose
@@ -30,65 +39,11 @@ class LoopConfig:
     stuck_timeout_s: float = 3.0
     stuck_reverse_s: float = 0.30
     stuck_reverse_speed_scale: float = 0.6
-    replan_every_steps: int = 4
     hard_turn_heading_deg: float = 70.0
     hard_turn_duration_scale: float = 0.55
     hard_turn_speed_scale: float = 0.75
     heading_steer_gain: float = 0.55
-
-
-def _estimate_translation_step_cells_for_duration(
-    duration_s: float,
-    motor: MotorController,
-    *,
-    speed: Optional[int] = None,
-) -> float:
-    base_step = float(duration_s) / float(max(1e-6, motor.cfg.step_seconds))
-    speed_ref = max(1.0, float(motor.cfg.speed))
-    speed_cmd = float(motor.cfg.speed if speed is None else max(0, min(100, int(speed))))
-    return base_step * (speed_cmd / speed_ref)
-
-
-def _estimate_ackermann_yaw_delta(step_cells: float, steer_deg: float, follower: PathFollower) -> float:
-    wheelbase = max(1e-6, float(follower.cfg.wheelbase))
-    steer_rad = math.radians(float(steer_deg))
-    return float(step_cells) * math.tan(steer_rad) / wheelbase
-
-
-def _wrap_angle(a: float) -> float:
-    while a > math.pi:
-        a -= 2.0 * math.pi
-    while a < -math.pi:
-        a += 2.0 * math.pi
-    return a
-
-
-def _clamp(value: float, lo: float, hi: float) -> float:
-    return max(float(lo), min(float(hi), float(value)))
-
-
-def _integrate_dead_reckoning(
-    *,
-    shared_map: SharedMap,
-    car_id: int,
-    forward_step: float,
-    yaw_delta: float,
-) -> Pose:
-    pose_world = shared_map.get_pose(car_id, frame="world")
-    if pose_world is None:
-        pose_world = Pose(0.0, 0.0, 0.0)
-
-    step = float(forward_step)
-    dtheta = float(yaw_delta)
-    theta_mid = float(pose_world.theta) + 0.5 * dtheta
-
-    next_pose = Pose(
-        x=float(pose_world.x + step * math.cos(theta_mid)),
-        y=float(pose_world.y + step * math.sin(theta_mid)),
-        theta=float(_wrap_angle(float(pose_world.theta) + dtheta)),
-    )
-    shared_map.set_pose(car_id, next_pose)
-    return next_pose
+    min_forward_ultra_countdown: int = 10
 
 
 def _tick_ultrasonic(
@@ -96,12 +51,10 @@ def _tick_ultrasonic(
     motor: MotorController,
     shared_map: SharedMap,
     loop_cfg: LoopConfig,
-    ultra_countdown: int,
     car_id: int,
 ) -> tuple[Optional[float], int]:
     dist_cm = read_ultrasonic_cm(motor)
-    ultra_countdown = max(0, ultra_countdown - 1)
-    ultra_countdown = min(ultra_countdown, ultrasonic_to_countdown(dist_cm))
+    ultra_countdown = ultrasonic_to_countdown(dist_cm)
 
     pose_world = shared_map.get_pose(car_id, frame="world")
     if pose_world is not None:
@@ -154,18 +107,6 @@ def _plan_goal_path(
             car_id=car_id,
         )
     return path
-
-
-def _build_equilateral_triangle_route(start_xy_grid: Tuple[int, int], *, side_cells: int = 6) -> list[Tuple[int, int]]:
-    side = max(3, int(side_cells))
-    height = max(2, int(round(side * math.sqrt(3.0) * 0.5)))
-    sx, sy = int(start_xy_grid[0]), int(start_xy_grid[1])
-    return [
-        (sx, sy),
-        (sx + side, sy),
-        (sx + side // 2, sy + height),
-        (sx, sy),
-    ]
 
 
 def _recover_from_stuck(
@@ -242,7 +183,6 @@ def drive_to_goal(
     last_ultra_tick_t = 0.0
     t0 = time.time()
     last_motion_t = t0
-    steps_since_replan = int(loop_cfg.replan_every_steps)
 
     follower.reset()
 
@@ -256,13 +196,12 @@ def drive_to_goal(
                     motor=motor,
                     shared_map=shared_map,
                     loop_cfg=loop_cfg,
-                    ultra_countdown=ultra_countdown,
                     car_id=car_id,
                 )
 
             pose_grid = shared_map.get_pose(car_id, frame="grid")
             if pose_grid is None:
-                _integrate_dead_reckoning(
+                integrate_dead_reckoning(
                     shared_map=shared_map,
                     car_id=car_id,
                     forward_step=0.0,
@@ -281,16 +220,7 @@ def drive_to_goal(
                 motor.mark_reached()
                 return True
 
-            path_blocked = current_path is not None and planner.is_obstructed(current_path, shared_map)
-
-            # Recalculate when bootstrapping, when the ultrasonic demands it, or when the path is now blocked.
-            needs_path = (
-                current_path is None
-                or ultra_countdown <= 0
-                or path_blocked
-                or steps_since_replan >= int(loop_cfg.replan_every_steps)
-            )
-            if needs_path:
+            if current_path is None:
                 current_path = _plan_goal_path(
                     planner=planner,
                     shared_map=shared_map,
@@ -298,8 +228,6 @@ def drive_to_goal(
                     debug_show_grid=debug_show_grid,
                     car_id=car_id,
                 )
-                ultra_countdown = max(1, ultrasonic_to_countdown(latest_ultra_cm))
-                steps_since_replan = 0
 
             if current_path is None or len(current_path.waypoints) < 2:
                 current_path = None
@@ -311,18 +239,18 @@ def drive_to_goal(
                 )
                 if recovered:
                     reverse_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.stuck_reverse_speed_scale))))
-                    _integrate_dead_reckoning(
+                    integrate_dead_reckoning(
                         shared_map=shared_map,
                         car_id=car_id,
-                        forward_step=-_estimate_translation_step_cells_for_duration(
+                        forward_step=-estimate_step_cells_for_duration(
                             loop_cfg.stuck_reverse_s,
-                            motor,
+                            step_seconds=float(motor.cfg.step_seconds),
                             speed=reverse_speed,
+                            speed_ref=int(motor.cfg.speed),
                         ),
                         yaw_delta=0.0,
                     )
                     ultra_countdown = 0
-                    steps_since_replan = int(loop_cfg.replan_every_steps)
                     continue
                 time.sleep(follower.cfg.dt)
                 continue
@@ -338,24 +266,48 @@ def drive_to_goal(
                 )
                 if recovered:
                     reverse_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.stuck_reverse_speed_scale))))
-                    _integrate_dead_reckoning(
+                    integrate_dead_reckoning(
                         shared_map=shared_map,
                         car_id=car_id,
-                        forward_step=-_estimate_translation_step_cells_for_duration(
+                        forward_step=-estimate_step_cells_for_duration(
                             loop_cfg.stuck_reverse_s,
-                            motor,
+                            step_seconds=float(motor.cfg.step_seconds),
                             speed=reverse_speed,
+                            speed_ref=int(motor.cfg.speed),
                         ),
                         yaw_delta=0.0,
                     )
                 ultra_countdown = 0
-                steps_since_replan = int(loop_cfg.replan_every_steps)
+                continue
+
+            if ultra_countdown < int(loop_cfg.min_forward_ultra_countdown):
+                hold_path_len = len(current_path.waypoints) if current_path is not None else 0
+                motor.stop()
+                current_path = None
+                _log_drive_status(
+                    pose_grid=pose_grid,
+                    goal_xy_grid=goal_xy_grid,
+                    d_goal=d_goal,
+                    dist_cm=latest_ultra_cm,
+                    ultra_countdown=ultra_countdown,
+                    path_len=hold_path_len,
+                    target_xy=(pose_grid.x, pose_grid.y),
+                    heading_error_deg=0.0,
+                    odom_step_cells=0.0,
+                    odom_yaw_deg=0.0,
+                    odom_steer_deg=0.0,
+                    drive_mode="ultra_hold",
+                    drive_speed=0,
+                    drive_duration_s=0.0,
+                    prefix="dead_reckon ",
+                )
+                time.sleep(max(loop_cfg.pause_after_stop_s, loop_cfg.ultra_timer_period_s))
                 continue
 
             lookahead = follower.compute_lookahead(d_goal)
             target_x, target_y = follower.lookahead_point(current_path, pose_grid, lookahead)
             heading_error_deg = math.degrees(
-                _wrap_angle(math.atan2(target_y - pose_grid.y, target_x - pose_grid.x) - pose_grid.theta)
+                wrap_angle(math.atan2(target_y - pose_grid.y, target_x - pose_grid.x) - pose_grid.theta)
             )
             path_len = len(current_path.waypoints) if current_path is not None else 0
             steer_deg = follower.steering_command(current_path, pose_grid, d_goal)
@@ -367,20 +319,23 @@ def drive_to_goal(
                 drive_duration_s *= float(loop_cfg.hard_turn_duration_scale)
                 drive_speed = max(1, int(round(float(motor.cfg.speed) * float(loop_cfg.hard_turn_speed_scale))))
                 drive_mode = "hard_turn"
-                steer_deg = _clamp(
+                steer_deg = clamp(
                     float(loop_cfg.heading_steer_gain) * float(heading_error_deg),
                     -float(follower.cfg.max_steer_deg),
                     float(follower.cfg.max_steer_deg),
                 )
 
-            step_cells = _estimate_translation_step_cells_for_duration(
+            step_cells = estimate_step_cells_for_duration(
                 drive_duration_s,
-                motor,
+                step_seconds=float(motor.cfg.step_seconds),
                 speed=drive_speed,
+                speed_ref=int(motor.cfg.speed),
             )
             motor.set_steering(steer_deg)
             applied_steer_deg = motor.get_applied_steering_deg()
-            expected_yaw_deg = math.degrees(_estimate_ackermann_yaw_delta(step_cells, applied_steer_deg, follower))
+            expected_yaw_deg = math.degrees(
+                estimate_ackermann_yaw_delta(step_cells, applied_steer_deg, float(follower.cfg.wheelbase))
+            )
 
             _log_drive_status(
                 pose_grid=pose_grid,
@@ -401,15 +356,14 @@ def drive_to_goal(
             )
 
             motor.forward_for(drive_duration_s, speed=drive_speed)
-            yaw_delta = _estimate_ackermann_yaw_delta(step_cells, applied_steer_deg, follower)
-            _integrate_dead_reckoning(
+            yaw_delta = estimate_ackermann_yaw_delta(step_cells, applied_steer_deg, float(follower.cfg.wheelbase))
+            integrate_dead_reckoning(
                 shared_map=shared_map,
                 car_id=car_id,
                 forward_step=step_cells,
                 yaw_delta=yaw_delta,
             )
             last_motion_t = time.time()
-            steps_since_replan += 1
 
     finally:
         motor.stop()
@@ -465,7 +419,7 @@ def main() -> None:
 
     try:
         start_grid = shared_map.get_car_grid_position(0)
-        route = _build_equilateral_triangle_route(start_grid, side_cells=6)
+        route = build_equilateral_triangle_route(start_grid, side_cells=6)
         print("Drive route:", route)
         for goal in route[1:]:
             ok = drive_to_goal(
