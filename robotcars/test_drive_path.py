@@ -32,24 +32,24 @@ from model import TargetPoint, Path, Pose
 
 @dataclass
 class LoopConfig:
-    cm_per_grid: float = 50.0
-    ahead_cm_min: float = 5.0
-    ahead_cm_max: float = 120.0
-    action_tick_s: float = 0.10
-    ultra_stop_cm: float = 20.0
-    ultra_caution_cm: float = 40.0
+    cm_per_grid: float = 50.0                    # centimeters per cell
+    ahead_cm_min: float = 5.0                    # closest mapped obstacle
+    ahead_cm_max: float = 120.0                  # farthest mapped obstacle
+    action_tick_s: float = 0.10                  # control loop tick
+    ultra_stop_cm: float = 20.0                  # immediate obstacle stop
+    ultra_caution_cm: float = 40.0               # obstacle caution band
 
-    hard_turn_heading_deg: float = 60.0
-    pivot_turn_heading_deg: float = 90.0
-    hard_turn_duration_scale: float = 0.55
-    hard_turn_speed_scale: float = 0.75
-    pivot_turn_duration_s: float = 0.50
-    pivot_turn_speed_scale: float = 0.75
-    pivot_turn_steer_min_deg: float = 8.0
-    pivot_turn_steer_gain: float = 0.14
-    escape_pivot_forward_scale: float = 0.65
-    escape_pivot_reverse_scale: float = 1.0
-    heading_steer_gain: float = 0.32
+    hard_turn_heading_deg: float = 60.0          # start hard turns
+    pivot_turn_heading_deg: float = 90.0         # start pivot turns
+    hard_turn_duration_scale: float = 0.55       # shorten hard turns
+    hard_turn_speed_scale: float = 0.75          # slow hard turns
+    pivot_turn_duration_s: float = 0.50          # pivot phase duration
+    pivot_turn_speed_scale: float = 0.75         # pivot speed scale
+    pivot_turn_steer_min_deg: float = 8.0        # minimum pivot steer
+    pivot_turn_steer_gain: float = 0.14          # pivot steer gain
+    escape_pivot_forward_scale: float = 0.65     # escape forward fraction
+    escape_pivot_reverse_scale: float = 1.0      # escape reverse fraction
+    heading_steer_gain: float = 0.32             # heading error gain
 
 
 @dataclass
@@ -308,7 +308,7 @@ def _apply_action_tick(
 
     odom_step_mag = estimate_step_cells_for_duration(
         tick_s,
-        step_seconds=float(motor.cfg.step_seconds),
+        action_tick_s=tick_s,
         speed=phase.speed,
         speed_ref=int(motor.cfg.speed),
     )
@@ -559,38 +559,31 @@ def main() -> None:
 
     planner = MovementPlanner(
         planning_cfg=PlanningConfig(
-            include_slam_points=False,
-            inflation_radius_cells=0,
-            simplify_path=True,
-            nudge_start_goal=True,
+            include_slam_points=False,            # ignore SLAM points
+            inflation_radius_cells=0,             # no obstacle inflation
+            nudge_start_goal=True,                # shift blocked start/end
         )
     )
 
     motor = MotorController(MotorConfig(
-        speed=26,
-        step_seconds=0.40,
-        steering_slew_deg_per_s=90.0,
-        steer_sign=1.0,
-        steer_offset_deg=0.0,
-        max_steer_deg=35.0,
-        settle_seconds=0.01,
+        speed=26,                                 # default drive speed
+        settle_seconds=0.01,                      # servo settle pause
     ))
 
     follower = PathFollower(motor, FollowerConfig(
-        lookahead=5.0,
-        wheelbase=0.7,
-        goal_tolerance=0.6,
-        steer_sign=1.0,
-        max_steer_deg=motor.cfg.max_steer_deg,
-        steer_alpha=0.25,
-        steer_deadband_deg=2.0,
-        steer_rate_limit_deg_per_tick=12.0,
-        dock_distance_grid=8.0,
-        dock_min_lookahead_grid=1.5,
+        lookahead=5.0,                            # pure pursuit lookahead distance
+        wheelbase=0.7,                            # front to back wheel wheelbase
+        goal_tolerance=0.6,                       # goal reached radius
+        steer_sign=1.0,                           # follower steering sign
+        steer_alpha=0.25,                         # steering smoother
+        steer_deadband_deg=2.0,                   # ignore tiny steer changes
+        steer_rate_limit_deg_per_tick=12.0,       # max steer change
+        dock_distance_grid=8.0,                   # near goal threshold
+        dock_min_lookahead_grid=1.5,              # minimum dock lookahead
     ))
 
     loop_cfg = LoopConfig(
-        cm_per_grid=14,
+        cm_per_grid=14,                           # centimeters per cell
     )
 
     try:

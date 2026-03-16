@@ -66,13 +66,12 @@ class PlanningConfig:
     algorithm: Literal["astar", "weighted_astar"] = "weighted_astar"
     astar_heuristic_weight: float = 1.25
 
-    include_slam_points: bool = False
+    include_slam_points: bool = False           # ignore SLAM points
     slam_points_radius_cells: int = 0
     slam_points_max: int = 1500
 
-    inflation_radius_cells: int = 1
-    nudge_start_goal: bool = True
-    simplify_path: bool = True
+    inflation_radius_cells: int = 1             # no obstacle inflation
+    nudge_start_goal: bool = True               # shift blocked endpoints
     max_waypoints: int = 800
 
 
@@ -105,7 +104,7 @@ class MovementPlanner:
 
         grid = self._build_grid(shared_map, size=size, cfg=cfg)
 
-        if cfg.nudge_start_goal:
+        if cfg.nudge_start_goal:  # Nudge blocked endpoint cells
             start = self._nudge_free(grid, start)
             goal = self._nudge_free(grid, goal)
 
@@ -119,14 +118,12 @@ class MovementPlanner:
             heuristic_weight=self._heuristic_weight(cfg),
         )
 
-        # Real robot behavior: if there is no safe path, do not ignore the map.
+        # if there is no path, do not ignore the map.
         if raw_path is None:
             return Path(waypoints=[TargetPoint(x=float(start[0]), y=float(start[1]))])
 
         waypoints = [TargetPoint(x=float(x), y=float(y)) for (x, y) in raw_path]
-
-        if cfg.simplify_path:
-            waypoints = self._simplify_waypoints(waypoints)
+        waypoints = self._simplify_waypoints(waypoints)
 
         if cfg.max_waypoints > 0 and len(waypoints) > cfg.max_waypoints:
             waypoints = waypoints[: cfg.max_waypoints]
@@ -136,11 +133,11 @@ class MovementPlanner:
     def _build_grid(self, shared_map: SharedMap, *, size: tuple[int, int], cfg: PlanningConfig) -> np.ndarray:
         grid = shared_map.to_occupancy_grid(
             size=size,
-            include_slam_points=cfg.include_slam_points,
+            include_slam_points=cfg.include_slam_points,  # Fold in SLAM points
             slam_points_radius_cells=cfg.slam_points_radius_cells,
             slam_points_max=cfg.slam_points_max,
         )
-        if cfg.inflation_radius_cells > 0:
+        if cfg.inflation_radius_cells > 0:  # Expand obstacle safety margins
             grid = self._inflate_grid(grid, radius=int(cfg.inflation_radius_cells))
         return grid
 
@@ -160,7 +157,6 @@ class MovementPlanner:
         out.slam_points_max = int(getattr(pc, "slam_points_max", out.slam_points_max))
         out.inflation_radius_cells = int(getattr(pc, "inflation_radius_cells", out.inflation_radius_cells))
         out.nudge_start_goal = bool(getattr(pc, "nudge_start_goal", out.nudge_start_goal))
-        out.simplify_path = bool(getattr(pc, "simplify_path", out.simplify_path))
         out.max_waypoints = int(getattr(pc, "max_waypoints", out.max_waypoints))
         return out
 
