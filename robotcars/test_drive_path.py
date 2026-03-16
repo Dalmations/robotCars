@@ -56,7 +56,6 @@ class LoopConfig:
 class UltrasonicState:
     dist_cm: Optional[float]
     countdown: int
-    last_valid_cm: Optional[float]
 
 
 @dataclass
@@ -102,17 +101,10 @@ def _tick_ultrasonic(
     motor: MotorController,
     shared_map: SharedMap,
     loop_cfg: LoopConfig,
-    ultra_state: UltrasonicState,
     car_id: int,
 ) -> UltrasonicState:
     raw_dist_cm = read_ultrasonic_cm(motor)
     dist_cm = raw_dist_cm
-    last_valid_cm = ultra_state.last_valid_cm
-
-    if raw_dist_cm is not None:
-        last_valid_cm = raw_dist_cm
-    else:
-        dist_cm = last_valid_cm
 
     ultra_countdown = ultrasonic_to_countdown(
         dist_cm,
@@ -121,7 +113,7 @@ def _tick_ultrasonic(
     )
 
     pose_world = shared_map.get_pose(car_id, frame="world")
-    if pose_world is not None and dist_cm is not None:
+    if pose_world is not None:
         shared_map.add_ultra_obstacle(
             pose_world=pose_world,
             dist_cm=dist_cm,
@@ -133,7 +125,6 @@ def _tick_ultrasonic(
     return UltrasonicState(
         dist_cm=dist_cm,
         countdown=ultra_countdown,
-        last_valid_cm=last_valid_cm,
     )
 
 
@@ -415,7 +406,6 @@ def drive_to_goal(
             stop_cm=float(loop_cfg.ultra_stop_cm),
             caution_cm=float(loop_cfg.ultra_caution_cm),
         ),
-        last_valid_cm=None,
     )
 
     last_ultra_tick_t = 0.0
@@ -433,7 +423,6 @@ def drive_to_goal(
                     motor=motor,
                     shared_map=shared_map,
                     loop_cfg=loop_cfg,
-                    ultra_state=ultra_state,
                     car_id=car_id,
                 )
 
@@ -589,7 +578,7 @@ def main() -> None:
 
     follower = PathFollower(motor, FollowerConfig(
         lookahead=5.0,
-        wheelbase=1.5,
+        wheelbase=0.7,
         goal_tolerance=0.6,
         steer_sign=1.0,
         max_steer_deg=motor.cfg.max_steer_deg,
