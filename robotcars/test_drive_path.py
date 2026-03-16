@@ -1,3 +1,5 @@
+# Core path-driving behavior for a single robot.
+# Defines loop tuning, motion-action building, and per-tick control logic used by `main.py`.
 from __future__ import annotations
 
 import math
@@ -14,15 +16,11 @@ from car_tools.camera_input import (
 from coordination.shared_map import SharedMap
 from car_tools.movement import (
     MovementPlanner,
-    PlanningConfig,
-    build_equilateral_triangle_route,
-    build_square_route,
     clamp,
 )
-from car_tools.motor_controller import MotorController, MotorConfig
+from car_tools.motor_controller import MotorController
 from car_tools.picarx_path_follower import (
     PathFollower,
-    FollowerConfig,
     estimate_step_cells_for_duration,
     integrate_dead_reckoning,
     wrap_angle,
@@ -547,78 +545,3 @@ def drive_to_goal(
         motor.stop()
 
     return False
-
-
-def main() -> None:
-    shared_map = SharedMap()
-    shared_map.configure_grid(
-        size=(30, 30),
-        resolution=1.0,
-    )
-    shared_map.set_pose(0, Pose(0.0, 0.0, 0.0))
-
-    planner = MovementPlanner(
-        planning_cfg=PlanningConfig(
-            include_slam_points=False,            # ignore SLAM points
-            inflation_radius_cells=0,             # no obstacle inflation
-            nudge_start_goal=True,                # shift blocked start/end
-        )
-    )
-
-    motor = MotorController(MotorConfig(
-        speed=26,                                 # default drive speed
-        settle_seconds=0.01,                      # servo settle pause
-    ))
-
-    follower = PathFollower(motor, FollowerConfig(
-        lookahead=5.0,                            # pure pursuit lookahead distance
-        wheelbase=0.75,                            # front to back wheel wheelbase
-        goal_tolerance=0.6,                       # goal reached radius
-        steer_sign=1.0,                           # follower steering sign
-        steer_alpha=0.25,                         # steering smoother
-        steer_deadband_deg=2.0,                   # ignore tiny steer changes
-        steer_rate_limit_deg_per_tick=12.0,       # max steer change
-        dock_distance_grid=8.0,                   # near goal threshold
-        dock_min_lookahead_grid=1.5,              # minimum dock lookahead
-    ))
-
-    loop_cfg = LoopConfig(
-        cm_per_grid=15,                           # centimeters per cell
-    )
-
-    try:
-        start_grid = shared_map.get_car_grid_position(0)
-        # route = build_equilateral_triangle_route(start_grid, side_cells=6)
-        # route = build_square_route(start_grid, side_cells=6)
-        route = [
-            (start_grid[0], start_grid[1]),
-            (start_grid[0] + 6, start_grid[1])
-        ]
-        print("Drive route:", route)
-        for goal in route[1:]:
-            ok = drive_to_goal(
-                goal,
-                shared_map=shared_map,
-                planner=planner,
-                follower=follower,
-                motor=motor,
-                loop_cfg=loop_cfg,
-                timeout_s=180.0,
-                debug_show_grid=True,
-            )
-            print(f"Reached {goal}:", ok)
-            time.sleep(0.5)
-
-    finally:
-        motor.stop()
-        try:
-            cv2.destroyAllWindows()
-        except Exception:
-            pass
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        pass
