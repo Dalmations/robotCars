@@ -49,7 +49,7 @@ class LoopConfig:
     pivot_turn_steer_gain: float = 0.14          # pivot steer gain
     escape_pivot_forward_scale: float = 0.65     # escape forward fraction
     escape_pivot_reverse_scale: float = 1.0      # escape reverse fraction
-    heading_steer_gain: float = 0.32             # heading error gain
+    heading_steer_gain: float = 0.5             # heading error gain
 
 
 @dataclass
@@ -572,7 +572,7 @@ def main() -> None:
 
     follower = PathFollower(motor, FollowerConfig(
         lookahead=5.0,                            # pure pursuit lookahead distance
-        wheelbase=0.7,                            # front to back wheel wheelbase
+        wheelbase=0.75,                            # front to back wheel wheelbase
         goal_tolerance=0.6,                       # goal reached radius
         steer_sign=1.0,                           # follower steering sign
         steer_alpha=0.25,                         # steering smoother
@@ -583,7 +583,7 @@ def main() -> None:
     ))
 
     loop_cfg = LoopConfig(
-        cm_per_grid=14,                           # centimeters per cell
+        cm_per_grid=15,                           # centimeters per cell
     )
 
     try:
