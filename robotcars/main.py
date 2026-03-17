@@ -1,22 +1,17 @@
 # Main entry point for the drive-path demo.
-# Builds the shared map, planner, motor, follower, and route, then runs each goal in sequence.
+# Builds the shared map, motor, follower, and a fixed shape path, then follows it once.
 from __future__ import annotations
 
 import time
 
 import cv2
 
-from car_tools.movement import (
-    MovementPlanner,
-    PlanningConfig,
-    build_equilateral_triangle_route,
-    build_square_route,
-)
+from car_tools.movement import build_equilateral_triangle_route, build_square_route, route_to_path
 from car_tools.motor_controller import MotorConfig, MotorController
 from car_tools.picarx_path_follower import FollowerConfig, PathFollower
 from coordination.shared_map import SharedMap
-from model import Pose
-from test_drive_path import LoopConfig, drive_to_goal
+from model import Path, Pose
+from test_drive_path import LoopConfig, drive_path
 
 
 def build_shared_map() -> SharedMap:
@@ -27,16 +22,6 @@ def build_shared_map() -> SharedMap:
     )
     shared_map.set_pose(0, Pose(0.0, 0.0, 0.0))
     return shared_map
-
-
-def build_planner() -> MovementPlanner:
-    return MovementPlanner(
-        planning_cfg=PlanningConfig(
-            include_slam_points=False,            # ignore SLAM points
-            inflation_radius_cells=0,             # no obstacle inflation
-            nudge_start_goal=True,                # shift blocked start/end
-        )
-    )
 
 
 def build_motor() -> MotorController:
@@ -69,36 +54,37 @@ def build_loop_config() -> LoopConfig:
 def build_route(shared_map: SharedMap) -> list[tuple[int, int]]:
     start_grid = shared_map.get_car_grid_position(0)
     # route = build_equilateral_triangle_route(start_grid, side_cells=6)
-    # route = build_square_route(start_grid, side_cells=6)
+    route = build_square_route(start_grid, side_cells=6)
     return [
-        (start_grid[0], start_grid[1]),
-        (start_grid[0] + 6, start_grid[1]),
+        *route,
     ]
+
+
+def build_path(shared_map: SharedMap) -> Path:
+    return route_to_path(build_route(shared_map))
 
 
 def main() -> None:
     shared_map = build_shared_map()
-    planner = build_planner()
     motor = build_motor()
     follower = build_follower(motor)
     loop_cfg = build_loop_config()
-    route = build_route(shared_map)
+    path = build_path(shared_map)
 
     try:
+        route = [(int(round(wp.x)), int(round(wp.y))) for wp in path.waypoints]
         print("Drive route:", route)
-        for goal in route[1:]:
-            ok = drive_to_goal(
-                goal,
-                shared_map=shared_map,
-                planner=planner,
-                follower=follower,
-                motor=motor,
-                loop_cfg=loop_cfg,
-                timeout_s=180.0,
-                debug_show_grid=True,
-            )
-            print(f"Reached {goal}:", ok)
-            time.sleep(0.5)
+        ok = drive_path(
+            path,
+            shared_map=shared_map,
+            follower=follower,
+            motor=motor,
+            loop_cfg=loop_cfg,
+            timeout_s=180.0,
+            debug_show_grid=True,
+        )
+        print(f"Completed path to {route[-1]}:", ok)
+        time.sleep(0.5)
     finally:
         motor.stop()
         try:
