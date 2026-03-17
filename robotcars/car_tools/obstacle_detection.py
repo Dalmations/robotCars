@@ -1,14 +1,46 @@
+# Conservative monocular VO helpers for intermittent yaw correction.
+# Keeps dead reckoning primary, uses OpenCV sparse tracking plus essential-matrix rotation as a gated assist.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from typing import Optional, Tuple, List, Literal
+from dataclasses import dataclass, field
+from typing import Literal, Optional
 
 import cv2
 import numpy as np
 
 from model import Pose
-from coordination.shared_map import SharedMap
+
+def _wrap_angle(angle_rad: float) -> float:
+    while angle_rad > math.pi:
+        angle_rad -= 2.0 * math.pi
+    while angle_rad < -math.pi:
+        angle_rad += 2.0 * math.pi
+    return angle_rad
+
+def _point_coverage(points_xy: np.ndarray, image_shape: tuple[int, int]) -> float:
+    if points_xy.size == 0:
+        return 0.0
+
+    h, w = int(image_shape[0]), int(image_shape[1])
+    if h <= 0 or w <= 0:
+        return 0.0
+
+    min_xy = np.min(points_xy, axis=0)
+    max_xy = np.max(points_xy, axis=0)
+    box_w = max(1.0, float(max_xy[0] - min_xy[0]))
+    box_h = max(1.0, float(max_xy[1] - min_xy[1]))
+    return float((box_w * box_h) / float(w * h))
+
+
+def _rotation_angle_deg(R: np.ndarray) -> float:
+    trace_val = float(np.trace(R))
+    cos_theta = float(np.clip((trace_val - 1.0) * 0.5, -1.0, 1.0))
+    return float(math.degrees(math.acos(cos_theta)))
+
+
+def _yaw_from_relative_rotation(R: np.ndarray) -> float:
+    return float(math.atan2(float(R[0, 2] - R[2, 0]), float(R[0, 0] + R[2, 2])))
 
 
 @dataclass
@@ -17,6 +49,7 @@ class CameraIntrinsics:
     fy: float
     cx: float
     cy: float
+    dist_coeffs: Optional[tuple[float, ...]] = None
 
     def K(self) -> np.ndarray:
         return np.array(
@@ -26,658 +59,911 @@ class CameraIntrinsics:
             dtype=np.float64,
         )
 
+    def dist(self) -> Optional[np.ndarray]:
+        if self.dist_coeffs is None:
+            return None
+        arr = np.asarray(self.dist_coeffs, dtype=np.float64).reshape(-1)
+        return None if arr.size == 0 else arr
+
 
 @dataclass
-class VslamConfig:
-    # Feature extraction
-    extractor: Literal["orb", "gftt_orb"] = "orb"
-    max_corners: int = 2000
-    quality_level: float = 0.01
-    min_distance: int = 10
-    orb_nfeatures: int = 2500
-
-    # Matching
-    ratio_test: float = 0.75
-    keep_best: int = 800
-
-    # Geometry
-    ransac_prob: float = 0.999
-    ransac_thresh: float = 1.0
-    min_inliers: int = 12          # essential-matrix inliers
-    min_pose_inliers: int = 10     # recoverPose support
-    max_rotation_deg: float = 45.0
-    translation_step: float = 1.0
-
-    # Motion gating
-    min_median_flow_px: float = 0.75
-    min_triangulation_flow_px: float = 1.25
-    min_inlier_coverage: float = 0.02
-    stale_frame_delta_mean: float = 0.35
-    max_weak_hold_frames: int = 3
-
-    # Triangulation filters
-    min_parallax_w: float = 0.003
-    min_depth: float = 0.05
-    max_depth: float = 200.0
-
-    # Debug
-    debug_draw_keypoints: bool = True
-    debug_draw_matches: bool = True
-    debug_max_match_draw: int = 80
-
-    # Pose frame publishing
-    forward_sign: float = 1.0
-    pose_ema_alpha: float = 0.2
-
-    # Confidence
-    confidence_ema_alpha: float = 0.25
-    confidence_good_threshold: float = 0.55
-    confidence_min_features: int = 140
-    confidence_min_inliers: float = 20.0
-    confidence_min_sharpness: float = 45.0
-    confidence_min_contrast: float = 25.0
-
-    # Image preprocessing
+class ImagePreprocessConfig:
     input_color_order: Literal["rgb", "bgr"] = "rgb"
     gray_source: Literal["luma", "green", "y_channel"] = "green"
-    gray_flat_field_correction: bool = True
-    gray_flat_field_sigma: float = 28.0
-    gray_flat_field_strength: float = 0.85
-    gray_use_clahe: bool = True
-    gray_clahe_clip_limit: float = 2.2
-    gray_clahe_tile_size: int = 8
-    gray_gamma: float = 1.0
-    gray_unsharp_amount: float = 0.0
+    undistort: bool = True
 
     auto_white_balance: bool = True
     max_channel_gain: float = 1.8
 
+    flat_field_correction: bool = True
+    flat_field_sigma: float = 28.0
+    flat_field_strength: float = 0.85
+
+    use_clahe: bool = True
+    clahe_clip_limit: float = 2.2
+    clahe_tile_size: int = 8
+
+    gamma: float = 1.0
+    unsharp_amount: float = 0.0
+
 
 @dataclass
-class VslamStatus:
-    tracking_ok: bool = False
-    feature_count: int = 0
-    inlier_count: int = 0
-    sharpness: float = 0.0
-    contrast: float = 0.0
-    mean_r: float = 0.0
-    mean_g: float = 0.0
-    mean_b: float = 0.0
+class VisualOdometryConfig:
+    preprocess: ImagePreprocessConfig = field(default_factory=ImagePreprocessConfig)
+
+    attempt_interval_s: float = 2.0
+    min_baseline_distance: float = 0.50
+    min_baseline_yaw_deg: float = 6.0
+
+    max_corners: int = 400
+    quality_level: float = 0.01
+    min_distance_px: int = 10
+    block_size: int = 7
+    feature_mask_top_fraction: float = 0.0
+
+    min_keyframe_features: int = 120
+    min_current_features: int = 120
+    min_tracked_points: int = 60
+
+    lk_win_size: int = 21
+    lk_max_level: int = 3
+    lk_max_iterations: int = 30
+    lk_epsilon: float = 0.01
+    lk_max_error_px: float = 20.0
+    use_forward_backward_check: bool = True
+    max_forward_backward_error_px: float = 1.5
+
+    ransac_prob: float = 0.999
+    ransac_threshold_px: float = 1.0
+    min_inliers: int = 35
+    min_inlier_ratio: float = 0.35
+    min_median_flow_px: float = 3.0
+    min_inlier_coverage: float = 0.08
+    max_median_epipolar_error_px: float = 1.5
+    max_p90_epipolar_error_px: float = 3.0
+    max_rotation_deg: float = 25.0
+    max_yaw_residual_deg: float = 12.0
+
+    min_sharpness: float = 45.0
+    min_contrast: float = 20.0
+
+    confidence_good_threshold: float = 0.70
+    yaw_correction_gain: float = 0.60
+    max_applied_yaw_correction_deg: float = 8.0
+
+    cm_per_world_unit: float = 1.0
+    ultrasonic_max_range_cm: float = 120.0
+    ultrasonic_forward_tolerance_cm: float = 15.0
+    ultrasonic_lateral_tolerance_cm: float = 12.0
+    ultrasonic_close_range_cm: float = 40.0
+    ultrasonic_close_yaw_limit_deg: float = 5.0
+
+
+@dataclass
+class VisualYawUpdate:
+    attempted: bool = False
+    accepted: bool = False
+    keyframe_replaced: bool = False
+    reason: str = "startup"
+
     confidence: float = 0.0
     high_confidence: bool = False
-    blurry: bool = True
 
+    keyframe_age_s: float = 0.0
+    baseline_distance: float = 0.0
+    baseline_yaw_deg: float = 0.0
+
+    sharpness: float = 0.0
+    contrast: float = 0.0
+    feature_count: int = 0
+    tracked_count: int = 0
+    inlier_count: int = 0
+    inlier_ratio: float = 0.0
     median_flow_px: float = 0.0
-    frame_delta_mean: float = 0.0
     inlier_coverage: float = 0.0
-    gate_reason: str = "startup"
-
-    match_count: int = 0
-    kept_match_count: int = 0
-    essential_inlier_count: int = 0
-    recover_pose_count: int = 0
-
-    requested_step: float = 0.0
-    applied_step: float = 0.0
-    translation_enabled: bool = False
+    median_epipolar_error_px: float = 0.0
+    p90_epipolar_error_px: float = 0.0
     rotation_deg: float = 0.0
 
-    raw_pose_x: float = 0.0
-    raw_pose_y: float = 0.0
-    raw_pose_theta: float = 0.0
-    filtered_pose_x: float = 0.0
-    filtered_pose_y: float = 0.0
-    filtered_pose_theta: float = 0.0
+    visual_yaw_delta_deg: float = 0.0
+    dead_reckoned_yaw_delta_deg: float = 0.0
+    yaw_residual_deg: float = 0.0
+    applied_yaw_correction_deg: float = 0.0
+
+    corrected_pose: Optional[Pose] = None
+    ultrasonic_distance_cm: Optional[float] = None
+    ultrasonic_rejected: bool = False
+
+
+@dataclass
+class _Keyframe:
+    gray: np.ndarray
+    points_xy: np.ndarray
+    pose: Pose
+    timestamp_s: float
 
 
 @dataclass
 class _MotionEstimate:
     ok: bool
-    idx_cur: np.ndarray
-    idx_last: np.ndarray
-    R: np.ndarray
-    t: np.ndarray
-
+    reason: str
+    tracked_cur: Optional[np.ndarray] = None
+    rotation_matrix: Optional[np.ndarray] = None
+    tracked_count: int = 0
+    inlier_count: int = 0
+    inlier_ratio: float = 0.0
     median_flow_px: float = 0.0
     inlier_coverage: float = 0.0
-    frame_delta_mean: float = 0.0
-
-    match_count: int = 0
-    kept_match_count: int = 0
-    essential_inlier_count: int = 0
-    recover_pose_count: int = 0
+    median_epipolar_error_px: float = 0.0
+    p90_epipolar_error_px: float = 0.0
     rotation_deg: float = 0.0
-    reason: str = "startup"
 
 
-class _Frame:
-    __slots__ = ("img_gray", "kps_xy", "des", "pose_Tcw")
-
-    def __init__(self, img_gray: np.ndarray, kps_xy: np.ndarray, des: np.ndarray, pose_Tcw: np.ndarray):
-        self.img_gray = img_gray
-        self.kps_xy = kps_xy
-        self.des = des
-        self.pose_Tcw = pose_Tcw
-
-
-def _add_ones(xyz: np.ndarray) -> np.ndarray:
-    return np.concatenate([xyz, np.ones((xyz.shape[0], 1), dtype=xyz.dtype)], axis=1)
-
-
-def _triangulate_Xw(
-    Tcw1: np.ndarray,
-    Tcw2: np.ndarray,
-    K: np.ndarray,
-    pts1_px: np.ndarray,
-    pts2_px: np.ndarray,
-) -> np.ndarray:
-    P1 = K @ Tcw1[:3, :]
-    P2 = K @ Tcw2[:3, :]
-    pts4 = cv2.triangulatePoints(P1, P2, pts1_px.T, pts2_px.T).T
-    w = np.where(np.abs(pts4[:, 3:4]) < 1e-12, 1e-12, pts4[:, 3:4])
-    return pts4[:, :3] / w
+@dataclass
+class _UpdateContext:
+    sharpness: float = 0.0
+    contrast: float = 0.0
+    ultrasonic_distance_cm: Optional[float] = None
+    keyframe_age_s: float = 0.0
+    baseline_distance: float = 0.0
+    baseline_yaw_deg: float = 0.0
+    feature_count: int = 0
+    confidence: float = 0.0
+    high_confidence: bool = False
+    tracked_count: int = 0
+    inlier_count: int = 0
+    inlier_ratio: float = 0.0
+    median_flow_px: float = 0.0
+    inlier_coverage: float = 0.0
+    median_epipolar_error_px: float = 0.0
+    p90_epipolar_error_px: float = 0.0
+    rotation_deg: float = 0.0
 
 
-class MonocularVSLAM:
+class ConservativeVisualOdometry:
     """
-    Feature-based monocular VO front-end with simple planar odometry fusion.
+    Sparse-feature monocular VO that only proposes bounded yaw corrections.
 
-    Key behavior:
-    - When recoverPose support is healthy, visual odometry supplies yaw.
-    - Translation magnitude comes from the externally provided step estimate.
-    - Brief weak-frame gaps can keep propagating pose from odometry.
+    Dead reckoning remains the primary pose source. This helper keeps a visual
+    keyframe, attempts a relative-motion solve at a low rate, and returns a
+    correction only when the update passes strict visual and ultrasonic gates.
     """
 
-    def __init__(
-        self,
-        intr: CameraIntrinsics,
-        shared_map: SharedMap,
-        car_id: int = 0,
-        cfg: Optional[VslamConfig] = None,
-    ):
-        self.cfg = cfg or VslamConfig()
-        self.K = intr.K()
-        self.shared_map = shared_map
-        self.car_id = car_id
-
-        self.orb = cv2.ORB_create(nfeatures=self.cfg.orb_nfeatures)
-        self.bf = cv2.BFMatcher(cv2.NORM_HAMMING)
-
-        self._last: Optional[_Frame] = None
-        self._pose_filt: Optional[Pose] = None
-        self._raw_pose_latest = Pose(0.0, 0.0, 0.0)
-        self._status = VslamStatus()
+    def __init__(self, intrinsics: CameraIntrinsics, cfg: Optional[VisualOdometryConfig] = None):
+        self.intr = intrinsics
+        self.cfg = cfg or VisualOdometryConfig()
+        self.K = intrinsics.K()
 
         self._clahe: Optional[cv2.CLAHE] = None
         self._gamma_lut: Optional[np.ndarray] = None
         self._gamma_lut_value: float = -1.0
 
-        self._Tcw = np.eye(4, dtype=np.float64)
-        self._weak_hold_count: int = 0
+        self._keyframe: Optional[_Keyframe] = None
+        self._last_attempt_time_s: Optional[float] = None
 
-        self._dbg_keypoints_bgr: Optional[np.ndarray] = None
-        self._dbg_matches_bgr: Optional[np.ndarray] = None
+    def reset(self) -> None:
+        self._keyframe = None
+        self._last_attempt_time_s = None
 
-        self._publish_pose()
-
-    # ---------------- Public diagnostics ----------------
-
-    def get_debug_keypoints_frame(self) -> Optional[np.ndarray]:
-        return None if self._dbg_keypoints_bgr is None else self._dbg_keypoints_bgr.copy()
-
-    def get_debug_matches_frame(self) -> Optional[np.ndarray]:
-        return None if self._dbg_matches_bgr is None else self._dbg_matches_bgr.copy()
-
-    def get_status(self) -> VslamStatus:
-        s = self._status
-        raw_pose = self._raw_pose_latest
-        filt_pose = self._pose_filt if self._pose_filt is not None else raw_pose
-        return VslamStatus(
-            tracking_ok=bool(s.tracking_ok),
-            feature_count=int(s.feature_count),
-            inlier_count=int(s.inlier_count),
-            sharpness=float(s.sharpness),
-            contrast=float(s.contrast),
-            mean_r=float(s.mean_r),
-            mean_g=float(s.mean_g),
-            mean_b=float(s.mean_b),
-            confidence=float(s.confidence),
-            high_confidence=bool(s.high_confidence),
-            blurry=bool(s.blurry),
-            median_flow_px=float(s.median_flow_px),
-            frame_delta_mean=float(s.frame_delta_mean),
-            inlier_coverage=float(s.inlier_coverage),
-            gate_reason=str(s.gate_reason),
-            match_count=int(s.match_count),
-            kept_match_count=int(s.kept_match_count),
-            essential_inlier_count=int(s.essential_inlier_count),
-            recover_pose_count=int(s.recover_pose_count),
-            requested_step=float(s.requested_step),
-            applied_step=float(s.applied_step),
-            translation_enabled=bool(s.translation_enabled),
-            rotation_deg=float(s.rotation_deg),
-            raw_pose_x=float(raw_pose.x),
-            raw_pose_y=float(raw_pose.y),
-            raw_pose_theta=float(raw_pose.theta),
-            filtered_pose_x=float(filt_pose.x),
-            filtered_pose_y=float(filt_pose.y),
-            filtered_pose_theta=float(filt_pose.theta),
+    def _make_update(
+        self,
+        context: _UpdateContext,
+        *,
+        reason: str,
+        attempted: bool,
+        accepted: bool = False,
+        keyframe_replaced: bool = False,
+        visual_yaw_delta_deg: float = 0.0,
+        dead_reckoned_yaw_delta_deg: float = 0.0,
+        yaw_residual_deg: float = 0.0,
+        applied_yaw_correction_deg: float = 0.0,
+        corrected_pose: Optional[Pose] = None,
+        ultrasonic_rejected: bool = False,
+    ) -> VisualYawUpdate:
+        return VisualYawUpdate(
+            attempted=attempted,
+            accepted=accepted,
+            keyframe_replaced=keyframe_replaced,
+            reason=reason,
+            confidence=context.confidence,
+            high_confidence=context.high_confidence,
+            keyframe_age_s=context.keyframe_age_s,
+            baseline_distance=context.baseline_distance,
+            baseline_yaw_deg=context.baseline_yaw_deg,
+            sharpness=context.sharpness,
+            contrast=context.contrast,
+            feature_count=context.feature_count,
+            tracked_count=context.tracked_count,
+            inlier_count=context.inlier_count,
+            inlier_ratio=context.inlier_ratio,
+            median_flow_px=context.median_flow_px,
+            inlier_coverage=context.inlier_coverage,
+            median_epipolar_error_px=context.median_epipolar_error_px,
+            p90_epipolar_error_px=context.p90_epipolar_error_px,
+            rotation_deg=context.rotation_deg,
+            visual_yaw_delta_deg=visual_yaw_delta_deg,
+            dead_reckoned_yaw_delta_deg=dead_reckoned_yaw_delta_deg,
+            yaw_residual_deg=yaw_residual_deg,
+            applied_yaw_correction_deg=applied_yaw_correction_deg,
+            corrected_pose=corrected_pose,
+            ultrasonic_distance_cm=context.ultrasonic_distance_cm,
+            ultrasonic_rejected=ultrasonic_rejected,
         )
 
-    def slam_quality(self, *, min_confidence: float = 0.55) -> Tuple[float, bool, bool, int, float]:
-        s = self.get_status()
-        conf = float(s.confidence)
-        high_conf = bool(s.high_confidence and conf >= float(min_confidence))
-        return conf, high_conf, bool(s.blurry), int(s.inlier_count), float(s.contrast)
+    @staticmethod
+    def _apply_motion_to_context(
+        context: _UpdateContext,
+        motion: _MotionEstimate,
+        *,
+        confidence: float = 0.0,
+        high_confidence: bool = False,
+    ) -> None:
+        context.confidence = float(confidence)
+        context.high_confidence = bool(high_confidence)
+        context.tracked_count = int(motion.tracked_count)
+        context.inlier_count = int(motion.inlier_count)
+        context.inlier_ratio = float(motion.inlier_ratio)
+        context.median_flow_px = float(motion.median_flow_px)
+        context.inlier_coverage = float(motion.inlier_coverage)
+        context.median_epipolar_error_px = float(motion.median_epipolar_error_px)
+        context.p90_epipolar_error_px = float(motion.p90_epipolar_error_px)
+        context.rotation_deg = float(motion.rotation_deg)
 
-    # ---------------- Main update ----------------
-
-    def tick(
+    def update(
         self,
         frame_rgb_or_bgr: np.ndarray,
-        translation_step: Optional[float] = None,
-        odom_yaw_delta: Optional[float] = None,
-    ) -> Optional[Pose]:
-        gray, frame_stats = self._to_gray(frame_rgb_or_bgr)
-        pts_xy, des = self._extract(gray)
-        requested_step = float(self.cfg.translation_step if translation_step is None else translation_step)
-        odom_yaw_delta = 0.0 if odom_yaw_delta is None else float(odom_yaw_delta)
-
+        dead_reckoned_pose: Pose,
+        timestamp_s: float,
+        ultrasonic_distance_cm: Optional[float] = None,
+    ) -> VisualYawUpdate:
+        gray = self._prepare_gray(frame_rgb_or_bgr)
         sharpness = self._frame_sharpness(gray)
         contrast = self._frame_contrast(gray)
-        feature_count = 0 if pts_xy is None else int(len(pts_xy))
-
-        if self.cfg.debug_draw_keypoints:
-            self._dbg_keypoints_bgr = (
-                self._render_keypoints(gray, pts_xy)
-                if pts_xy is not None and len(pts_xy) > 0
-                else cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-            )
-        else:
-            self._dbg_keypoints_bgr = None
-
-        if pts_xy is None or des is None or len(pts_xy) < 50:
-            return self._handle_weak_frame(
-                cur=None,
-                tracking_reason="too_few_features",
-                feature_count=feature_count,
-                sharpness=sharpness,
-                contrast=contrast,
-                frame_stats=frame_stats,
-                requested_step=requested_step,
-                odom_yaw_delta=odom_yaw_delta,
-            )
-
-        cur = _Frame(gray, pts_xy, des, self._Tcw.copy())
-
-        if self._last is None:
-            self._last = cur
-            self._dbg_matches_bgr = None
-            self._update_status(
-                tracking_ok=False,
-                feature_count=feature_count,
-                inlier_count=0,
-                sharpness=sharpness,
-                contrast=contrast,
-                mean_r=frame_stats["mean_r"],
-                mean_g=frame_stats["mean_g"],
-                mean_b=frame_stats["mean_b"],
-                median_flow_px=0.0,
-                frame_delta_mean=0.0,
-                inlier_coverage=0.0,
-                gate_reason="bootstrap_no_last",
-                requested_step=requested_step,
-            )
-            self._publish_pose(update_filter=False)
-            self._annotate_debug_frames()
-            return self.shared_map.poses.get(self.car_id)
-
-        frame_delta_mean = self._frame_delta_mean(self._last.img_gray, cur.img_gray)
-        if frame_delta_mean < float(self.cfg.stale_frame_delta_mean):
-            return self._handle_weak_frame(
-                cur=cur,
-                tracking_reason="stale_frame",
-                feature_count=feature_count,
-                sharpness=sharpness,
-                contrast=contrast,
-                frame_stats=frame_stats,
-                requested_step=requested_step,
-                odom_yaw_delta=odom_yaw_delta,
-                frame_delta_mean=frame_delta_mean,
-            )
-
-        motion = self._estimate_motion(last=self._last, cur=cur, frame_delta_mean=frame_delta_mean)
-        if not motion.ok:
-            return self._handle_weak_frame(
-                cur=cur,
-                tracking_reason=motion.reason,
-                feature_count=feature_count,
-                sharpness=sharpness,
-                contrast=contrast,
-                frame_stats=frame_stats,
-                requested_step=requested_step,
-                odom_yaw_delta=odom_yaw_delta,
-                median_flow_px=motion.median_flow_px,
-                frame_delta_mean=motion.frame_delta_mean,
-                inlier_coverage=motion.inlier_coverage,
-                match_count=motion.match_count,
-                kept_match_count=motion.kept_match_count,
-                essential_inlier_count=motion.essential_inlier_count,
-                recover_pose_count=motion.recover_pose_count,
-                rotation_deg=motion.rotation_deg,
-            )
-
-        # Rotation validity is stricter than before: recoverPose support must be healthy.
-        rotation_valid = motion.recover_pose_count >= int(self.cfg.min_pose_inliers)
-
-        # Translation is a separate decision from rotation.
-        translation_enabled = rotation_valid and abs(float(requested_step)) > 1e-9
-
-        if not rotation_valid:
-            return self._handle_weak_frame(
-                cur=cur,
-                tracking_reason="too_few_pose_inliers",
-                feature_count=feature_count,
-                sharpness=sharpness,
-                contrast=contrast,
-                frame_stats=frame_stats,
-                requested_step=requested_step,
-                odom_yaw_delta=odom_yaw_delta,
-                median_flow_px=motion.median_flow_px,
-                frame_delta_mean=motion.frame_delta_mean,
-                inlier_coverage=motion.inlier_coverage,
-                match_count=motion.match_count,
-                kept_match_count=motion.kept_match_count,
-                essential_inlier_count=motion.essential_inlier_count,
-                recover_pose_count=motion.recover_pose_count,
-                rotation_deg=motion.rotation_deg,
-            )
-
-        applied_step = 0.0
-        gate_reason = "rotation_only"
-
-        self._weak_hold_count = 0
-        vo_yaw_delta = self._yaw_delta_from_relative_rotation(motion.R)
-        self._apply_planar_motion(forward_step=requested_step, yaw_delta=vo_yaw_delta)
-        applied_step = abs(float(requested_step))
-        gate_reason = "tracking_ok" if translation_enabled else "rotation_only_zero_step"
-        cur.pose_Tcw = self._Tcw.copy()
-
-        if self.cfg.debug_draw_matches:
-            self._dbg_matches_bgr = self._render_inlier_matches(self._last, cur, motion.idx_last, motion.idx_cur)
-        else:
-            self._dbg_matches_bgr = None
-
-        if translation_enabled and motion.median_flow_px >= float(self.cfg.min_triangulation_flow_px):
-            pts_cur = cur.kps_xy[motion.idx_cur].astype(np.float64)
-            pts_last = self._last.kps_xy[motion.idx_last].astype(np.float64)
-
-            parallax_norm = self._parallax_norm(pts_last, pts_cur)
-            parallax_ok = parallax_norm > float(self.cfg.min_parallax_w)
-
-            Xw = _triangulate_Xw(cur.pose_Tcw, self._last.pose_Tcw, self.K, pts_cur, pts_last)
-            depth_ok = self._in_front_of_both(cur.pose_Tcw, self._last.pose_Tcw, Xw)
-
-            good = parallax_ok & depth_ok
-            Xw_good = Xw[good]
-
-            if Xw_good.shape[0] > 0:
-                # nav frame: x=forward(z), y=left(-x), z=up(-y)
-                Xnav = np.column_stack((Xw_good[:, 2], -Xw_good[:, 0], -Xw_good[:, 1])).astype(np.float32)
-                self.shared_map.add_map_points(Xnav)
-
-        self._update_status(
-            tracking_ok=True,
-            feature_count=feature_count,
-            inlier_count=int(motion.recover_pose_count),
+        context = _UpdateContext(
             sharpness=sharpness,
             contrast=contrast,
-            mean_r=frame_stats["mean_r"],
-            mean_g=frame_stats["mean_g"],
-            mean_b=frame_stats["mean_b"],
+            ultrasonic_distance_cm=ultrasonic_distance_cm,
+        )
+
+        if self._keyframe is None:
+            update = self._bootstrap_keyframe(
+                gray=gray,
+                pose=dead_reckoned_pose,
+                timestamp_s=timestamp_s,
+                context=context,
+                reason="bootstrap",
+            )
+            return update
+
+        context.keyframe_age_s = max(0.0, float(timestamp_s) - float(self._keyframe.timestamp_s))
+        context.baseline_distance = math.hypot(
+            float(dead_reckoned_pose.x) - float(self._keyframe.pose.x),
+            float(dead_reckoned_pose.y) - float(self._keyframe.pose.y),
+        )
+        context.baseline_yaw_deg = abs(
+            math.degrees(_wrap_angle(float(dead_reckoned_pose.theta) - float(self._keyframe.pose.theta)))
+        )
+
+        if self._last_attempt_time_s is not None:
+            dt_attempt = float(timestamp_s) - float(self._last_attempt_time_s)
+            if dt_attempt < float(self.cfg.attempt_interval_s):
+                return self._make_update(
+                    context,
+                    attempted=False,
+                    accepted=False,
+                    reason="wait_interval",
+                )
+
+        if (
+            context.baseline_distance < float(self.cfg.min_baseline_distance)
+            and context.baseline_yaw_deg < float(self.cfg.min_baseline_yaw_deg)
+        ):
+            return self._make_update(
+                context,
+                attempted=False,
+                accepted=False,
+                reason="insufficient_baseline",
+            )
+
+        self._last_attempt_time_s = float(timestamp_s)
+
+        if sharpness < float(self.cfg.min_sharpness):
+            return self._make_update(
+                context,
+                attempted=True,
+                accepted=False,
+                reason="blurry_frame",
+            )
+
+        if contrast < float(self.cfg.min_contrast):
+            return self._make_update(
+                context,
+                attempted=True,
+                accepted=False,
+                reason="low_contrast",
+            )
+
+        current_points = self._detect_features(gray)
+        context.feature_count = 0 if current_points is None else int(current_points.shape[0])
+        if context.feature_count < int(self.cfg.min_current_features):
+            return self._make_update(
+                context,
+                attempted=True,
+                accepted=False,
+                reason="too_few_features",
+            )
+
+        motion = self._estimate_motion(self._keyframe.gray, self._keyframe.points_xy, gray)
+        confidence = self._compute_confidence(
+            sharpness=sharpness,
+            contrast=contrast,
+            feature_count=context.feature_count,
+            tracked_count=motion.tracked_count,
+            inlier_count=motion.inlier_count,
+            inlier_ratio=motion.inlier_ratio,
             median_flow_px=motion.median_flow_px,
-            frame_delta_mean=motion.frame_delta_mean,
             inlier_coverage=motion.inlier_coverage,
-            gate_reason=gate_reason,
-            match_count=motion.match_count,
-            kept_match_count=motion.kept_match_count,
-            essential_inlier_count=motion.essential_inlier_count,
-            recover_pose_count=motion.recover_pose_count,
-            requested_step=requested_step,
-            applied_step=applied_step,
-            translation_enabled=translation_enabled,
-            rotation_deg=motion.rotation_deg,
+            median_epipolar_error_px=motion.median_epipolar_error_px,
+        )
+        high_confidence = bool(motion.ok and confidence >= float(self.cfg.confidence_good_threshold))
+        self._apply_motion_to_context(context, motion, confidence=confidence, high_confidence=high_confidence)
+
+        if not motion.ok:
+            return self._make_update(
+                context,
+                attempted=True,
+                accepted=False,
+                reason=motion.reason,
+            )
+
+        if not high_confidence:
+            return self._make_update(
+                context,
+                attempted=True,
+                accepted=False,
+                reason="low_confidence",
+            )
+
+        visual_yaw_delta = _yaw_from_relative_rotation(motion.rotation_matrix)
+        dr_yaw_delta = _wrap_angle(float(dead_reckoned_pose.theta) - float(self._keyframe.pose.theta))
+        yaw_residual = _wrap_angle(visual_yaw_delta - dr_yaw_delta)
+        yaw_residual_deg = math.degrees(yaw_residual)
+        if abs(yaw_residual_deg) > float(self.cfg.max_yaw_residual_deg):
+            return self._make_update(
+                context,
+                attempted=True,
+                accepted=False,
+                reason="yaw_residual_too_large",
+                visual_yaw_delta_deg=math.degrees(visual_yaw_delta),
+                dead_reckoned_yaw_delta_deg=math.degrees(dr_yaw_delta),
+                yaw_residual_deg=yaw_residual_deg,
+            )
+
+        correction_limit_deg = float(self.cfg.max_applied_yaw_correction_deg)
+        if self._is_valid_ultrasonic_cm(ultrasonic_distance_cm) and float(ultrasonic_distance_cm) <= float(self.cfg.ultrasonic_close_range_cm):
+            correction_limit_deg = min(correction_limit_deg, float(self.cfg.ultrasonic_close_yaw_limit_deg))
+
+        applied_yaw_correction_deg = float(np.clip(
+            float(self.cfg.yaw_correction_gain) * yaw_residual_deg,
+            -float(correction_limit_deg),
+            float(correction_limit_deg),
+        ))
+        corrected_theta = _wrap_angle(float(dead_reckoned_pose.theta) + math.radians(applied_yaw_correction_deg))
+        corrected_pose = Pose(float(dead_reckoned_pose.x), float(dead_reckoned_pose.y), corrected_theta)
+
+        ultrasonic_rejected = not self._ultrasonic_consistent(
+            pose_dead_reckoned=dead_reckoned_pose,
+            corrected_pose=corrected_pose,
+            ultrasonic_distance_cm=ultrasonic_distance_cm,
+        )
+        if ultrasonic_rejected:
+            return self._make_update(
+                context,
+                attempted=True,
+                accepted=False,
+                reason="ultrasonic_conflict",
+                visual_yaw_delta_deg=math.degrees(visual_yaw_delta),
+                dead_reckoned_yaw_delta_deg=math.degrees(dr_yaw_delta),
+                yaw_residual_deg=yaw_residual_deg,
+                applied_yaw_correction_deg=applied_yaw_correction_deg,
+                corrected_pose=corrected_pose,
+                ultrasonic_rejected=True,
+            )
+
+        replacement_points = current_points
+        if replacement_points is None or replacement_points.shape[0] < int(self.cfg.min_keyframe_features):
+            replacement_points = motion.tracked_cur.astype(np.float32)
+
+        self._set_keyframe(
+            gray=gray,
+            points_xy=replacement_points,
+            pose=corrected_pose,
+            timestamp_s=timestamp_s,
         )
 
-        self._last = cur
-        self._publish_pose()
-        self._annotate_debug_frames()
-        return self.shared_map.poses.get(self.car_id)
-
-    # ---------------- Pose publishing ----------------
-
-    def _publish_pose(self, *, update_filter: bool = True) -> None:
-        raw_pose = self._planar_pose_from_Tcw(self._Tcw)
-        self._raw_pose_latest = raw_pose
-
-        if update_filter or self._pose_filt is None:
-            alpha = float(self.cfg.pose_ema_alpha)
-            if alpha <= 0.0 or self._pose_filt is None:
-                self._pose_filt = raw_pose
-            else:
-                xf = (1.0 - alpha) * self._pose_filt.x + alpha * raw_pose.x
-                yf = (1.0 - alpha) * self._pose_filt.y + alpha * raw_pose.y
-
-                c0, s0 = math.cos(self._pose_filt.theta), math.sin(self._pose_filt.theta)
-                c1, s1 = math.cos(raw_pose.theta), math.sin(raw_pose.theta)
-                cf = (1.0 - alpha) * c0 + alpha * c1
-                sf = (1.0 - alpha) * s0 + alpha * s1
-                thf = math.atan2(sf, cf)
-
-                self._pose_filt = Pose(x=float(xf), y=float(yf), theta=float(thf))
-
-        self.shared_map.set_pose(self.car_id, self._pose_filt)
-
-    def _apply_planar_motion(self, *, forward_step: float, yaw_delta: float) -> None:
-        pose = self._planar_pose_from_Tcw(self._Tcw)
-        step = float(forward_step)
-        dtheta = float(yaw_delta)
-
-        theta_mid = pose.theta + 0.5 * dtheta
-        x_new = pose.x + step * math.cos(theta_mid)
-        y_new = pose.y + step * math.sin(theta_mid)
-        theta_new = self._wrap_angle(pose.theta + dtheta)
-
-        self._Tcw = self._planar_pose_to_Tcw(Pose(x=float(x_new), y=float(y_new), theta=float(theta_new)))
-
-    def _planar_pose_from_Tcw(self, Tcw: np.ndarray) -> Pose:
-        Twc = self._invert_se3(Tcw)
-        p = Twc[:3, 3]
-        Rwc = Twc[:3, :3]
-
-        s = float(self.cfg.forward_sign)
-        x_raw = float(s * p[2])
-        y_raw = float(s * (-p[0]))
-
-        fwd = Rwc[:, 2]
-        theta_raw = float(math.atan2(-s * fwd[0], s * fwd[2])) if (abs(fwd[0]) + abs(fwd[2]) > 1e-9) else 0.0
-        return Pose(x=x_raw, y=y_raw, theta=theta_raw)
-
-    @staticmethod
-    def _planar_pose_to_Twc(pose: Pose) -> np.ndarray:
-        theta = float(pose.theta)
-        c = float(math.cos(theta))
-        s = float(math.sin(theta))
-
-        Twc = np.eye(4, dtype=np.float64)
-        Twc[:3, :3] = np.array(
-            [
-                [c, 0.0, -s],
-                [0.0, 1.0, 0.0],
-                [s, 0.0, c],
-            ],
-            dtype=np.float64,
+        return self._make_update(
+            context,
+            attempted=True,
+            accepted=True,
+            keyframe_replaced=True,
+            reason="accepted",
+            visual_yaw_delta_deg=math.degrees(visual_yaw_delta),
+            dead_reckoned_yaw_delta_deg=math.degrees(dr_yaw_delta),
+            yaw_residual_deg=yaw_residual_deg,
+            applied_yaw_correction_deg=applied_yaw_correction_deg,
+            corrected_pose=corrected_pose,
         )
-        Twc[:3, 3] = np.array([-float(pose.y), 0.0, float(pose.x)], dtype=np.float64)
-        return Twc
 
-    def _planar_pose_to_Tcw(self, pose: Pose) -> np.ndarray:
-        return self._invert_se3(self._planar_pose_to_Twc(pose))
-
-    @staticmethod
-    def _invert_se3(T: np.ndarray) -> np.ndarray:
-        R = T[:3, :3]
-        t = T[:3, 3]
-        Tinv = np.eye(4, dtype=T.dtype)
-        Tinv[:3, :3] = R.T
-        Tinv[:3, 3] = -R.T @ t
-        return Tinv
-
-    @staticmethod
-    def _wrap_angle(a: float) -> float:
-        while a > math.pi:
-            a -= 2.0 * math.pi
-        while a < -math.pi:
-            a += 2.0 * math.pi
-        return a
-
-    # ---------------- Status ----------------
-
-    def _update_status(
+    def _bootstrap_keyframe(
         self,
         *,
-        tracking_ok: bool,
-        feature_count: int,
-        inlier_count: int,
-        sharpness: float,
-        contrast: float,
-        mean_r: float,
-        mean_g: float,
-        mean_b: float,
-        median_flow_px: float,
-        frame_delta_mean: float,
-        inlier_coverage: float,
-        gate_reason: str = "tracking_ok",
-        match_count: int = 0,
-        kept_match_count: int = 0,
-        essential_inlier_count: int = 0,
-        recover_pose_count: int = 0,
-        requested_step: float = 0.0,
-        applied_step: float = 0.0,
-        translation_enabled: bool = False,
-        rotation_deg: float = 0.0,
-    ) -> None:
-        f_ref = max(1.0, float(self.cfg.confidence_min_features))
-        i_ref = max(1.0, float(self.cfg.confidence_min_inliers))
-        s_ref = max(1e-6, float(self.cfg.confidence_min_sharpness))
-        c_ref = max(1e-6, float(self.cfg.confidence_min_contrast))
+        gray: np.ndarray,
+        pose: Pose,
+        timestamp_s: float,
+        context: _UpdateContext,
+        reason: str,
+    ) -> VisualYawUpdate:
+        points = self._detect_features(gray)
+        feature_count = 0 if points is None else int(points.shape[0])
+        context.feature_count = feature_count
+        if feature_count < int(self.cfg.min_keyframe_features):
+            return self._make_update(
+                context,
+                attempted=False,
+                accepted=False,
+                reason="bootstrap_too_few_features",
+            )
 
-        feat_score = float(np.clip(float(feature_count) / f_ref, 0.0, 1.0))
-        inlier_score = float(np.clip(float(inlier_count) / i_ref, 0.0, 1.0))
-        sharp_score = float(np.clip(float(sharpness) / s_ref, 0.0, 1.0))
-        contrast_score = float(np.clip(float(contrast) / c_ref, 0.0, 1.0))
-
-        raw_conf = 0.25 * feat_score + 0.45 * inlier_score + 0.20 * sharp_score + 0.10 * contrast_score
-        if not tracking_ok:
-            raw_conf *= 0.35
-
-        alpha = float(np.clip(self.cfg.confidence_ema_alpha, 0.0, 1.0))
-        conf = raw_conf if alpha <= 0.0 else ((1.0 - alpha) * float(self._status.confidence) + alpha * raw_conf)
-
-        self._status = VslamStatus(
-            tracking_ok=bool(tracking_ok),
-            feature_count=int(feature_count),
-            inlier_count=int(inlier_count),
-            sharpness=float(sharpness),
-            contrast=float(contrast),
-            mean_r=float(mean_r),
-            mean_g=float(mean_g),
-            mean_b=float(mean_b),
-            confidence=float(conf),
-            high_confidence=bool(tracking_ok and conf >= float(self.cfg.confidence_good_threshold)),
-            blurry=bool(sharpness < float(self.cfg.confidence_min_sharpness)),
-            median_flow_px=float(median_flow_px),
-            frame_delta_mean=float(frame_delta_mean),
-            inlier_coverage=float(inlier_coverage),
-            gate_reason=str(gate_reason),
-            match_count=int(match_count),
-            kept_match_count=int(kept_match_count),
-            essential_inlier_count=int(essential_inlier_count),
-            recover_pose_count=int(recover_pose_count),
-            requested_step=float(requested_step),
-            applied_step=float(applied_step),
-            translation_enabled=bool(translation_enabled),
-            rotation_deg=float(rotation_deg),
+        self._set_keyframe(gray=gray, points_xy=points, pose=pose, timestamp_s=timestamp_s)
+        return self._make_update(
+            context,
+            attempted=False,
+            accepted=False,
+            keyframe_replaced=True,
+            reason=reason,
         )
 
-    def _handle_weak_frame(
+    def _set_keyframe(self, *, gray: np.ndarray, points_xy: np.ndarray, pose: Pose, timestamp_s: float) -> None:
+        self._keyframe = _Keyframe(
+            gray=np.ascontiguousarray(gray),
+            points_xy=np.ascontiguousarray(points_xy.astype(np.float32).reshape(-1, 2)),
+            pose=Pose(float(pose.x), float(pose.y), float(pose.theta)),
+            timestamp_s=float(timestamp_s),
+        )
+
+    def _estimate_motion(
         self,
-        *,
-        cur: Optional[_Frame],
-        tracking_reason: str,
-        feature_count: int,
-        sharpness: float,
-        contrast: float,
-        frame_stats: dict,
-        requested_step: float,
-        odom_yaw_delta: float = 0.0,
-        median_flow_px: float = 0.0,
-        frame_delta_mean: float = 0.0,
-        inlier_coverage: float = 0.0,
-        match_count: int = 0,
-        kept_match_count: int = 0,
-        essential_inlier_count: int = 0,
-        recover_pose_count: int = 0,
-        rotation_deg: float = 0.0,
-    ) -> Optional[Pose]:
-        hold_limit = max(0, int(self.cfg.max_weak_hold_frames))
-        hold_tracking = bool(self._status.tracking_ok) and self._weak_hold_count < hold_limit
-        odom_step = float(requested_step)
-        odom_motion = abs(odom_step) > 1e-9 or abs(float(odom_yaw_delta)) > 1e-9
+        keyframe_gray: np.ndarray,
+        keyframe_points_xy: np.ndarray,
+        current_gray: np.ndarray,
+    ) -> _MotionEstimate:
+        tracked_prev, tracked_cur = self._track_keyframe_points(
+            keyframe_gray=keyframe_gray,
+            keyframe_points_xy=keyframe_points_xy,
+            current_gray=current_gray,
+        )
+        tracked_count = 0 if tracked_prev is None else int(tracked_prev.shape[0])
+        if tracked_prev is None or tracked_cur is None or tracked_count < int(self.cfg.min_tracked_points):
+            return _MotionEstimate(
+                ok=False,
+                reason="too_few_tracks",
+                tracked_count=tracked_count,
+            )
 
-        if hold_tracking:
-            self._weak_hold_count += 1
-            tracking_ok = True
-            if odom_motion:
-                self._apply_planar_motion(forward_step=odom_step, yaw_delta=float(odom_yaw_delta))
-                gate_reason = f"odom_hold_{tracking_reason}"
-            else:
-                gate_reason = f"hold_{tracking_reason}"
-        else:
-            self._weak_hold_count = 0
-            tracking_ok = False
-            gate_reason = tracking_reason
-            if cur is not None:
-                self._last = cur
+        flow = np.linalg.norm(tracked_cur - tracked_prev, axis=1)
+        median_flow_px = float(np.median(flow)) if flow.size > 0 else 0.0
+        if median_flow_px < float(self.cfg.min_median_flow_px):
+            return _MotionEstimate(
+                ok=False,
+                reason="insufficient_parallax",
+                tracked_cur=tracked_cur,
+                tracked_count=tracked_count,
+                median_flow_px=median_flow_px,
+            )
 
-        self._dbg_matches_bgr = None
-        self._update_status(
-            tracking_ok=tracking_ok,
-            feature_count=feature_count,
-            inlier_count=int(max(essential_inlier_count, recover_pose_count)),
-            sharpness=sharpness,
-            contrast=contrast,
-            mean_r=frame_stats["mean_r"],
-            mean_g=frame_stats["mean_g"],
-            mean_b=frame_stats["mean_b"],
+        E, ransac_mask = cv2.findEssentialMat(
+            tracked_prev,
+            tracked_cur,
+            self.K,
+            method=cv2.RANSAC,
+            prob=float(self.cfg.ransac_prob),
+            threshold=float(self.cfg.ransac_threshold_px),
+        )
+        if E is None or ransac_mask is None:
+            return _MotionEstimate(
+                ok=False,
+                reason="essential_failed",
+                tracked_cur=tracked_cur,
+                tracked_count=tracked_count,
+                median_flow_px=median_flow_px,
+            )
+
+        ransac_mask = ransac_mask.reshape(-1).astype(bool)
+        pts_prev_ransac = tracked_prev[ransac_mask]
+        pts_cur_ransac = tracked_cur[ransac_mask]
+        if pts_prev_ransac.shape[0] < int(self.cfg.min_inliers):
+            return _MotionEstimate(
+                ok=False,
+                reason="too_few_ransac_inliers",
+                tracked_cur=tracked_cur,
+                tracked_count=tracked_count,
+                inlier_count=int(pts_prev_ransac.shape[0]),
+                inlier_ratio=float(pts_prev_ransac.shape[0]) / max(1.0, float(tracked_count)),
+                median_flow_px=median_flow_px,
+            )
+
+        best_E: Optional[np.ndarray] = None
+        best_R: Optional[np.ndarray] = None
+        best_mask: Optional[np.ndarray] = None
+        best_support = -1
+        for candidate in self._essential_candidates(E):
+            try:
+                _pose_count, R, _t, pose_mask = cv2.recoverPose(candidate, pts_prev_ransac, pts_cur_ransac, self.K)
+            except cv2.error:
+                continue
+
+            if pose_mask is None:
+                continue
+
+            pose_support = int(pose_mask.reshape(-1).astype(bool).sum())
+            if pose_support > best_support:
+                best_support = pose_support
+                best_E = candidate
+                best_R = R
+                best_mask = pose_mask.reshape(-1).astype(bool)
+
+        if best_E is None or best_R is None or best_mask is None or best_support <= 0:
+            return _MotionEstimate(
+                ok=False,
+                reason="recover_pose_failed",
+                tracked_cur=tracked_cur,
+                tracked_count=tracked_count,
+                inlier_count=int(pts_prev_ransac.shape[0]),
+                inlier_ratio=float(pts_prev_ransac.shape[0]) / max(1.0, float(tracked_count)),
+                median_flow_px=median_flow_px,
+            )
+
+        inlier_prev = pts_prev_ransac[best_mask]
+        inlier_cur = pts_cur_ransac[best_mask]
+        inlier_count = int(inlier_prev.shape[0])
+        inlier_ratio = float(inlier_count) / max(1.0, float(tracked_count))
+        if inlier_count < int(self.cfg.min_inliers):
+            return _MotionEstimate(
+                ok=False,
+                reason="too_few_pose_inliers",
+                tracked_cur=tracked_cur,
+                tracked_count=tracked_count,
+                inlier_count=inlier_count,
+                inlier_ratio=inlier_ratio,
+                median_flow_px=median_flow_px,
+            )
+
+        if inlier_ratio < float(self.cfg.min_inlier_ratio):
+            return _MotionEstimate(
+                ok=False,
+                reason="low_inlier_ratio",
+                tracked_cur=tracked_cur,
+                tracked_count=tracked_count,
+                inlier_count=inlier_count,
+                inlier_ratio=inlier_ratio,
+                median_flow_px=median_flow_px,
+            )
+
+        inlier_coverage = _point_coverage(inlier_cur, current_gray.shape)
+        if inlier_coverage < float(self.cfg.min_inlier_coverage):
+            return _MotionEstimate(
+                ok=False,
+                reason="low_inlier_coverage",
+                tracked_cur=tracked_cur,
+                tracked_count=tracked_count,
+                inlier_count=inlier_count,
+                inlier_ratio=inlier_ratio,
+                median_flow_px=median_flow_px,
+                inlier_coverage=inlier_coverage,
+            )
+
+        epipolar_errors_px = self._epipolar_errors_px(best_E, inlier_prev, inlier_cur)
+        median_epi = float(np.median(epipolar_errors_px)) if epipolar_errors_px.size > 0 else float("inf")
+        p90_epi = float(np.percentile(epipolar_errors_px, 90)) if epipolar_errors_px.size > 0 else float("inf")
+        rotation_deg = _rotation_angle_deg(best_R)
+        if median_epi > float(self.cfg.max_median_epipolar_error_px) or p90_epi > float(self.cfg.max_p90_epipolar_error_px):
+            return _MotionEstimate(
+                ok=False,
+                reason="epipolar_error_too_large",
+                tracked_cur=tracked_cur,
+                rotation_matrix=best_R,
+                tracked_count=tracked_count,
+                inlier_count=inlier_count,
+                inlier_ratio=inlier_ratio,
+                median_flow_px=median_flow_px,
+                inlier_coverage=inlier_coverage,
+                median_epipolar_error_px=median_epi,
+                p90_epipolar_error_px=p90_epi,
+                rotation_deg=rotation_deg,
+            )
+
+        if rotation_deg > float(self.cfg.max_rotation_deg):
+            return _MotionEstimate(
+                ok=False,
+                reason="rotation_too_large",
+                tracked_cur=tracked_cur,
+                rotation_matrix=best_R,
+                tracked_count=tracked_count,
+                inlier_count=inlier_count,
+                inlier_ratio=inlier_ratio,
+                median_flow_px=median_flow_px,
+                inlier_coverage=inlier_coverage,
+                median_epipolar_error_px=median_epi,
+                p90_epipolar_error_px=p90_epi,
+                rotation_deg=rotation_deg,
+            )
+
+        return _MotionEstimate(
+            ok=True,
+            reason="ok",
+            tracked_cur=tracked_cur,
+            rotation_matrix=best_R,
+            tracked_count=tracked_count,
+            inlier_count=inlier_count,
+            inlier_ratio=inlier_ratio,
             median_flow_px=median_flow_px,
-            frame_delta_mean=frame_delta_mean,
             inlier_coverage=inlier_coverage,
-            gate_reason=gate_reason,
-            match_count=match_count,
-            kept_match_count=kept_match_count,
-            essential_inlier_count=essential_inlier_count,
-            recover_pose_count=recover_pose_count,
-            requested_step=requested_step,
-            applied_step=abs(odom_step) if hold_tracking and odom_motion else 0.0,
-            translation_enabled=bool(hold_tracking and abs(odom_step) > 1e-9),
+            median_epipolar_error_px=median_epi,
+            p90_epipolar_error_px=p90_epi,
             rotation_deg=rotation_deg,
         )
-        self._publish_pose(update_filter=False)
-        self._annotate_debug_frames()
-        return self.shared_map.poses.get(self.car_id)
 
-    # ---------------- Image preprocessing ----------------
+    def _track_keyframe_points(
+        self,
+        *,
+        keyframe_gray: np.ndarray,
+        keyframe_points_xy: np.ndarray,
+        current_gray: np.ndarray,
+    ) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        if keyframe_points_xy is None or keyframe_points_xy.size == 0:
+            return None, None
+
+        lk_points = keyframe_points_xy.reshape(-1, 1, 2).astype(np.float32)
+        next_pts, status, err = cv2.calcOpticalFlowPyrLK(
+            keyframe_gray,
+            current_gray,
+            lk_points,
+            None,
+            winSize=(int(self.cfg.lk_win_size), int(self.cfg.lk_win_size)),
+            maxLevel=int(self.cfg.lk_max_level),
+            criteria=(
+                cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+                int(self.cfg.lk_max_iterations),
+                float(self.cfg.lk_epsilon),
+            ),
+        )
+        if next_pts is None or status is None:
+            return None, None
+
+        valid = status.reshape(-1).astype(bool)
+        if err is not None:
+            valid &= err.reshape(-1) <= float(self.cfg.lk_max_error_px)
+
+        next_xy = next_pts.reshape(-1, 2)
+        h, w = int(current_gray.shape[0]), int(current_gray.shape[1])
+        valid &= np.isfinite(next_xy).all(axis=1)
+        valid &= (next_xy[:, 0] >= 0.0) & (next_xy[:, 0] < float(w))
+        valid &= (next_xy[:, 1] >= 0.0) & (next_xy[:, 1] < float(h))
+
+        if bool(self.cfg.use_forward_backward_check):
+            back_pts, back_status, _ = cv2.calcOpticalFlowPyrLK(
+                current_gray,
+                keyframe_gray,
+                next_pts,
+                None,
+                winSize=(int(self.cfg.lk_win_size), int(self.cfg.lk_win_size)),
+                maxLevel=int(self.cfg.lk_max_level),
+                criteria=(
+                    cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+                    int(self.cfg.lk_max_iterations),
+                    float(self.cfg.lk_epsilon),
+                ),
+            )
+            if back_pts is None or back_status is None:
+                return None, None
+
+            back_valid = back_status.reshape(-1).astype(bool)
+            fb_err = np.linalg.norm(back_pts.reshape(-1, 2) - keyframe_points_xy, axis=1)
+            valid &= back_valid
+            valid &= fb_err <= float(self.cfg.max_forward_backward_error_px)
+
+        tracked_prev = keyframe_points_xy[valid].astype(np.float64)
+        tracked_cur = next_xy[valid].astype(np.float64)
+        if tracked_prev.shape[0] == 0:
+            return None, None
+        return tracked_prev, tracked_cur
+
+    def _prepare_gray(self, img: np.ndarray) -> np.ndarray:
+        cfg = self.cfg.preprocess
+        src = img
+        if src.ndim == 3 and cfg.undistort and self.intr.dist() is not None:
+            src = cv2.undistort(src, self.K, self.intr.dist())
+
+        if src.ndim == 2:
+            gray = src
+        else:
+            color = np.ascontiguousarray(src)
+            if color.dtype != np.uint8:
+                color = np.clip(color, 0, 255).astype(np.uint8)
+
+            if cfg.auto_white_balance and str(cfg.gray_source).lower() != "green":
+                color = self._gray_world_balance(
+                    color,
+                    order=str(cfg.input_color_order).lower(),
+                    max_gain=float(cfg.max_channel_gain),
+                )
+
+            gray_source = str(cfg.gray_source).lower()
+            if gray_source == "green":
+                gray = color[:, :, 1]
+            elif gray_source == "y_channel":
+                code = cv2.COLOR_BGR2YCrCb if cfg.input_color_order == "bgr" else cv2.COLOR_RGB2YCrCb
+                gray = cv2.cvtColor(color, code)[:, :, 0]
+            else:
+                code = cv2.COLOR_BGR2GRAY if cfg.input_color_order == "bgr" else cv2.COLOR_RGB2GRAY
+                gray = cv2.cvtColor(color, code)
+
+        if gray.dtype != np.uint8:
+            gray = np.clip(gray, 0, 255).astype(np.uint8)
+
+        if cfg.flat_field_correction:
+            gray = self._flat_field_correct(
+                gray,
+                sigma=float(cfg.flat_field_sigma),
+                strength=float(cfg.flat_field_strength),
+            )
+
+        if cfg.use_clahe:
+            tile = max(1, int(cfg.clahe_tile_size))
+            if self._clahe is None:
+                self._clahe = cv2.createCLAHE(clipLimit=float(cfg.clahe_clip_limit), tileGridSize=(tile, tile))
+            gray = self._clahe.apply(gray)
+
+        if abs(float(cfg.gamma) - 1.0) > 1e-6:
+            gray = cv2.LUT(gray, self._gamma_lut_for(float(cfg.gamma)))
+
+        amount = float(cfg.unsharp_amount)
+        if amount > 1e-6:
+            blur = cv2.GaussianBlur(gray, (0, 0), sigmaX=1.0, sigmaY=1.0)
+            gray = cv2.addWeighted(gray, 1.0 + amount, blur, -amount, 0)
+
+        return np.ascontiguousarray(gray)
+
+    def _detect_features(self, gray: np.ndarray) -> Optional[np.ndarray]:
+        mask = None
+        if float(self.cfg.feature_mask_top_fraction) > 0.0:
+            h, w = gray.shape[:2]
+            mask = np.zeros((h, w), dtype=np.uint8)
+            y0 = int(round(float(h) * float(self.cfg.feature_mask_top_fraction)))
+            mask[y0:, :] = 255
+
+        pts = cv2.goodFeaturesToTrack(
+            gray,
+            maxCorners=int(self.cfg.max_corners),
+            qualityLevel=float(self.cfg.quality_level),
+            minDistance=float(self.cfg.min_distance_px),
+            mask=mask,
+            blockSize=int(self.cfg.block_size),
+        )
+        if pts is None:
+            return None
+        return np.ascontiguousarray(pts.reshape(-1, 2).astype(np.float32))
+
+    def _compute_confidence(
+        self,
+        *,
+        sharpness: float,
+        contrast: float,
+        feature_count: int,
+        tracked_count: int,
+        inlier_count: int,
+        inlier_ratio: float,
+        median_flow_px: float,
+        inlier_coverage: float,
+        median_epipolar_error_px: float,
+    ) -> float:
+        feature_score = np.clip(float(feature_count) / max(1.0, float(self.cfg.min_current_features)), 0.0, 1.0)
+        track_score = np.clip(float(tracked_count) / max(1.0, float(self.cfg.min_tracked_points)), 0.0, 1.0)
+        inlier_score = np.clip(float(inlier_count) / max(1.0, float(self.cfg.min_inliers)), 0.0, 1.0)
+        ratio_score = np.clip(float(inlier_ratio) / max(1e-6, float(self.cfg.min_inlier_ratio)), 0.0, 1.0)
+        flow_score = np.clip(float(median_flow_px) / max(1e-6, float(self.cfg.min_median_flow_px)), 0.0, 1.0)
+        coverage_score = np.clip(float(inlier_coverage) / max(1e-6, float(self.cfg.min_inlier_coverage)), 0.0, 1.0)
+        sharp_score = np.clip(float(sharpness) / max(1e-6, float(self.cfg.min_sharpness)), 0.0, 1.0)
+        contrast_score = np.clip(float(contrast) / max(1e-6, float(self.cfg.min_contrast)), 0.0, 1.0)
+        epi_score = np.clip(1.0 - (float(median_epipolar_error_px) / max(1e-6, float(self.cfg.max_median_epipolar_error_px))), 0.0, 1.0)
+
+        confidence = (
+            0.12 * feature_score
+            + 0.12 * track_score
+            + 0.22 * inlier_score
+            + 0.14 * ratio_score
+            + 0.10 * flow_score
+            + 0.10 * coverage_score
+            + 0.10 * sharp_score
+            + 0.05 * contrast_score
+            + 0.05 * epi_score
+        )
+        return float(np.clip(confidence, 0.0, 1.0))
+
+    def _ultrasonic_consistent(
+        self,
+        *,
+        pose_dead_reckoned: Pose,
+        corrected_pose: Pose,
+        ultrasonic_distance_cm: Optional[float],
+    ) -> bool:
+        if not self._is_valid_ultrasonic_cm(ultrasonic_distance_cm):
+            return True
+
+        dist_cm = float(ultrasonic_distance_cm)
+        if dist_cm > float(self.cfg.ultrasonic_max_range_cm):
+            return True
+
+        cm_per_unit = max(1e-6, float(self.cfg.cm_per_world_unit))
+        forward_units = dist_cm / cm_per_unit
+
+        obs_x = float(pose_dead_reckoned.x) + forward_units * math.cos(float(pose_dead_reckoned.theta))
+        obs_y = float(pose_dead_reckoned.y) + forward_units * math.sin(float(pose_dead_reckoned.theta))
+
+        dx = obs_x - float(corrected_pose.x)
+        dy = obs_y - float(corrected_pose.y)
+        c = math.cos(float(corrected_pose.theta))
+        s = math.sin(float(corrected_pose.theta))
+
+        forward_prime_cm = (dx * c + dy * s) * cm_per_unit
+        lateral_prime_cm = (-dx * s + dy * c) * cm_per_unit
+
+        if forward_prime_cm <= 0.0:
+            return False
+
+        if abs(forward_prime_cm - dist_cm) > float(self.cfg.ultrasonic_forward_tolerance_cm):
+            return False
+
+        if abs(lateral_prime_cm) > float(self.cfg.ultrasonic_lateral_tolerance_cm):
+            return False
+
+        return True
+
+    @staticmethod
+    def _is_valid_ultrasonic_cm(dist_cm: Optional[float]) -> bool:
+        return dist_cm is not None and math.isfinite(float(dist_cm)) and float(dist_cm) > 0.0
+
+    @staticmethod
+    def _essential_candidates(E: np.ndarray) -> list[np.ndarray]:
+        E = np.asarray(E, dtype=np.float64)
+        if E.size == 9:
+            return [E.reshape(3, 3)]
+
+        candidates: list[np.ndarray] = []
+        if E.ndim != 2:
+            return candidates
+
+        if E.shape[1] == 3 and E.shape[0] % 3 == 0:
+            for row in range(0, E.shape[0], 3):
+                candidates.append(E[row:row + 3, :])
+        elif E.shape[0] == 3 and E.shape[1] % 3 == 0:
+            for col in range(0, E.shape[1], 3):
+                candidates.append(E[:, col:col + 3])
+        return [candidate for candidate in candidates if candidate.shape == (3, 3)]
+
+    def _epipolar_errors_px(self, E: np.ndarray, pts1_px: np.ndarray, pts2_px: np.ndarray) -> np.ndarray:
+        Kinv = np.linalg.inv(self.K)
+        F = Kinv.T @ E @ Kinv
+
+        x1 = np.column_stack((pts1_px[:, 0], pts1_px[:, 1], np.ones((pts1_px.shape[0],), dtype=np.float64)))
+        x2 = np.column_stack((pts2_px[:, 0], pts2_px[:, 1], np.ones((pts2_px.shape[0],), dtype=np.float64)))
+        Fx1 = (F @ x1.T).T
+        Ftx2 = (F.T @ x2.T).T
+        numer = np.abs(np.sum(x2 * Fx1, axis=1))
+
+        denom1 = np.sqrt(np.maximum(Fx1[:, 0] ** 2 + Fx1[:, 1] ** 2, 1e-12))
+        denom2 = np.sqrt(np.maximum(Ftx2[:, 0] ** 2 + Ftx2[:, 1] ** 2, 1e-12))
+        return 0.5 * (numer / denom1 + numer / denom2)
 
     @staticmethod
     def _frame_sharpness(gray: np.ndarray) -> float:
@@ -692,91 +978,6 @@ class MonocularVSLAM:
         if gray.size == 0:
             return 0.0
         return float(np.std(gray))
-
-    @staticmethod
-    def _frame_delta_mean(prev_gray: np.ndarray, cur_gray: np.ndarray) -> float:
-        if prev_gray.shape != cur_gray.shape:
-            return float("inf")
-        diff = cv2.absdiff(prev_gray, cur_gray)
-        return float(np.mean(diff))
-
-    def _to_gray(self, img: np.ndarray) -> Tuple[np.ndarray, dict]:
-        stats = {"mean_r": 0.0, "mean_g": 0.0, "mean_b": 0.0}
-
-        if img.ndim == 2:
-            gray = img
-        else:
-            color = img
-            if color.dtype != np.uint8:
-                color = np.clip(color, 0, 255).astype(np.uint8)
-            color = np.ascontiguousarray(color)
-
-            if self.cfg.input_color_order == "bgr":
-                b = color[:, :, 0].astype(np.float32)
-                g_ch = color[:, :, 1].astype(np.float32)
-                r = color[:, :, 2].astype(np.float32)
-            else:
-                r = color[:, :, 0].astype(np.float32)
-                g_ch = color[:, :, 1].astype(np.float32)
-                b = color[:, :, 2].astype(np.float32)
-
-            stats = {
-                "mean_r": float(r.mean()),
-                "mean_g": float(g_ch.mean()),
-                "mean_b": float(b.mean()),
-            }
-
-            gray_source = str(self.cfg.gray_source).lower()
-            if self.cfg.auto_white_balance and gray_source != "green":
-                color = self._gray_world_balance(
-                    color,
-                    order=str(self.cfg.input_color_order).lower(),
-                    max_gain=float(self.cfg.max_channel_gain),
-                )
-
-            if gray_source == "green":
-                gray = color[:, :, 1]
-            elif gray_source == "y_channel":
-                if self.cfg.input_color_order == "bgr":
-                    ycc = cv2.cvtColor(color, cv2.COLOR_BGR2YCrCb)
-                else:
-                    ycc = cv2.cvtColor(color, cv2.COLOR_RGB2YCrCb)
-                gray = ycc[:, :, 0]
-            else:
-                if self.cfg.input_color_order == "bgr":
-                    gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
-                else:
-                    gray = cv2.cvtColor(color, cv2.COLOR_RGB2GRAY)
-
-        if gray.dtype != np.uint8:
-            gray = np.clip(gray, 0, 255).astype(np.uint8)
-
-        if self.cfg.gray_flat_field_correction:
-            gray = self._flat_field_correct(
-                gray,
-                sigma=float(self.cfg.gray_flat_field_sigma),
-                strength=float(self.cfg.gray_flat_field_strength),
-            )
-
-        gamma = float(self.cfg.gray_gamma)
-        if abs(gamma - 1.0) > 1e-3:
-            gray = cv2.LUT(gray, self._gamma_lut_for(gamma))
-
-        if self.cfg.gray_use_clahe:
-            tile = max(2, int(self.cfg.gray_clahe_tile_size))
-            if self._clahe is None:
-                self._clahe = cv2.createCLAHE(
-                    clipLimit=float(self.cfg.gray_clahe_clip_limit),
-                    tileGridSize=(tile, tile),
-                )
-            gray = self._clahe.apply(gray)
-
-        amount = float(self.cfg.gray_unsharp_amount)
-        if amount > 1e-3:
-            blur = cv2.GaussianBlur(gray, (0, 0), sigmaX=1.0, sigmaY=1.0)
-            gray = cv2.addWeighted(gray, 1.0 + amount, blur, -amount, 0)
-
-        return np.ascontiguousarray(gray), stats
 
     @staticmethod
     def _flat_field_correct(gray: np.ndarray, *, sigma: float, strength: float) -> np.ndarray:
@@ -798,7 +999,6 @@ class MonocularVSLAM:
         corrected = np.clip(corrected, 0.0, 255.0)
         if strength < 0.999:
             corrected = (1.0 - strength) * src + strength * corrected
-
         return corrected.astype(np.uint8)
 
     def _gamma_lut_for(self, gamma: float) -> np.ndarray:
@@ -809,7 +1009,6 @@ class MonocularVSLAM:
         x = np.linspace(0.0, 1.0, 256, dtype=np.float32)
         y = np.power(x, 1.0 / gamma)
         lut = np.clip(y * 255.0, 0.0, 255.0).astype(np.uint8)
-
         self._gamma_lut = lut
         self._gamma_lut_value = gamma
         return lut
@@ -851,379 +1050,13 @@ class MonocularVSLAM:
             out[:, :, 0] *= gr
             out[:, :, 1] *= gg
             out[:, :, 2] *= gb
-
         return np.clip(out, 0.0, 255.0).astype(np.uint8)
 
-    # ---------------- Feature extraction + motion ----------------
 
-    def _extract(self, gray: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        if self.cfg.extractor == "gftt_orb":
-            pts = cv2.goodFeaturesToTrack(
-                gray,
-                maxCorners=self.cfg.max_corners,
-                qualityLevel=self.cfg.quality_level,
-                minDistance=self.cfg.min_distance,
-            )
-            if pts is None:
-                return None, None
-
-            kps = [cv2.KeyPoint(float(p[0][0]), float(p[0][1]), 20.0) for p in pts]
-            kps, des = self.orb.compute(gray, kps)
-            if des is None or kps is None or len(kps) == 0:
-                return None, None
-
-            xy = np.array([kp.pt for kp in kps], dtype=np.float32)
-            return xy, des
-
-        kps, des = self.orb.detectAndCompute(gray, None)
-        if des is None or kps is None or len(kps) == 0:
-            return None, None
-
-        if len(kps) > self.cfg.max_corners:
-            order = np.argsort([-kp.response for kp in kps])[: self.cfg.max_corners]
-            kps = [kps[i] for i in order]
-            des = des[np.array(order, dtype=np.int64)]
-
-        xy = np.array([kp.pt for kp in kps], dtype=np.float32)
-        return xy, des
-
-    def _estimate_motion(self, last: _Frame, cur: _Frame, frame_delta_mean: float) -> _MotionEstimate:
-        matches_knn = self.bf.knnMatch(last.des, cur.des, k=2)
-
-        idx_last: List[int] = []
-        idx_cur: List[int] = []
-        dists: List[float] = []
-
-        for pair in matches_knn:
-            if len(pair) < 2:
-                continue
-            m, n = pair
-            if m.distance < self.cfg.ratio_test * n.distance:
-                idx_last.append(m.queryIdx)
-                idx_cur.append(m.trainIdx)
-                dists.append(float(m.distance))
-
-        match_count = len(idx_last)
-        if match_count < 8:
-            return _MotionEstimate(
-                False,
-                np.array([]),
-                np.array([]),
-                np.eye(3),
-                np.zeros((3, 1)),
-                frame_delta_mean=frame_delta_mean,
-                match_count=match_count,
-                kept_match_count=match_count,
-                reason="too_few_matches",
-            )
-
-        if len(idx_last) > self.cfg.keep_best:
-            order = np.argsort(dists)[: self.cfg.keep_best]
-            idx_last = [idx_last[i] for i in order]
-            idx_cur = [idx_cur[i] for i in order]
-
-        kept_match_count = len(idx_last)
-        pts_last = last.kps_xy[np.array(idx_last)].astype(np.float64)
-        pts_cur = cur.kps_xy[np.array(idx_cur)].astype(np.float64)
-
-        E, inliers = cv2.findEssentialMat(
-            pts_last,
-            pts_cur,
-            self.K,
-            method=cv2.RANSAC,
-            prob=self.cfg.ransac_prob,
-            threshold=self.cfg.ransac_thresh,
-        )
-        if E is None or inliers is None:
-            return _MotionEstimate(
-                False,
-                np.array([]),
-                np.array([]),
-                np.eye(3),
-                np.zeros((3, 1)),
-                frame_delta_mean=frame_delta_mean,
-                match_count=match_count,
-                kept_match_count=kept_match_count,
-                reason="essential_failed",
-            )
-
-        inliers = inliers.reshape(-1).astype(bool)
-        essential_inlier_count = int(inliers.sum())
-        if essential_inlier_count < int(self.cfg.min_inliers):
-            return _MotionEstimate(
-                False,
-                np.array([]),
-                np.array([]),
-                np.eye(3),
-                np.zeros((3, 1)),
-                frame_delta_mean=frame_delta_mean,
-                match_count=match_count,
-                kept_match_count=kept_match_count,
-                essential_inlier_count=essential_inlier_count,
-                reason="too_few_inliers",
-            )
-
-        pts_last_in = pts_last[inliers]
-        pts_cur_in = pts_cur[inliers]
-
-        pose_solution = self._recover_pose_from_essential(E, pts_last_in, pts_cur_in)
-        if pose_solution is None:
-            return _MotionEstimate(
-                False,
-                np.array([]),
-                np.array([]),
-                np.eye(3),
-                np.zeros((3, 1)),
-                frame_delta_mean=frame_delta_mean,
-                match_count=match_count,
-                kept_match_count=kept_match_count,
-                essential_inlier_count=essential_inlier_count,
-                reason="recover_pose_failed",
-            )
-
-        recover_pose_count, R, t, pose_mask = pose_solution
-        recover_pose_count = int(recover_pose_count)
-
-        if recover_pose_count <= 0 or pose_mask is None:
-            return _MotionEstimate(
-                False,
-                np.array([]),
-                np.array([]),
-                np.eye(3),
-                np.zeros((3, 1)),
-                frame_delta_mean=frame_delta_mean,
-                match_count=match_count,
-                kept_match_count=kept_match_count,
-                essential_inlier_count=essential_inlier_count,
-                recover_pose_count=recover_pose_count,
-                reason="recover_pose_failed",
-            )
-
-        pose_mask = pose_mask.reshape(-1).astype(bool)
-        if int(pose_mask.sum()) <= 0:
-            return _MotionEstimate(
-                False,
-                np.array([]),
-                np.array([]),
-                np.eye(3),
-                np.zeros((3, 1)),
-                frame_delta_mean=frame_delta_mean,
-                match_count=match_count,
-                kept_match_count=kept_match_count,
-                essential_inlier_count=essential_inlier_count,
-                recover_pose_count=recover_pose_count,
-                reason="recover_pose_failed",
-            )
-
-        idx_last_in = np.array(idx_last, dtype=np.int64)[inliers][pose_mask]
-        idx_cur_in = np.array(idx_cur, dtype=np.int64)[inliers][pose_mask]
-        pts_last_pose = pts_last_in[pose_mask]
-        pts_cur_pose = pts_cur_in[pose_mask]
-
-        flow = np.linalg.norm(pts_cur_pose - pts_last_pose, axis=1)
-        median_flow = float(np.median(flow)) if flow.size > 0 else 0.0
-        inlier_coverage = self._point_coverage(pts_cur_pose, cur.img_gray.shape)
-        rotation_deg = self._rotation_angle_deg(R)
-
-        if rotation_deg > float(self.cfg.max_rotation_deg):
-            return _MotionEstimate(
-                False,
-                np.array([]),
-                np.array([]),
-                np.eye(3),
-                np.zeros((3, 1)),
-                median_flow_px=median_flow,
-                inlier_coverage=inlier_coverage,
-                frame_delta_mean=frame_delta_mean,
-                match_count=match_count,
-                kept_match_count=kept_match_count,
-                essential_inlier_count=essential_inlier_count,
-                recover_pose_count=recover_pose_count,
-                rotation_deg=rotation_deg,
-                reason="rotation_too_large",
-            )
-
-        return _MotionEstimate(
-            True,
-            idx_cur_in,
-            idx_last_in,
-            R,
-            t,
-            median_flow_px=median_flow,
-            inlier_coverage=inlier_coverage,
-            frame_delta_mean=frame_delta_mean,
-            match_count=match_count,
-            kept_match_count=kept_match_count,
-            essential_inlier_count=essential_inlier_count,
-            recover_pose_count=recover_pose_count,
-            rotation_deg=rotation_deg,
-            reason="ok",
-        )
-
-    def _recover_pose_from_essential(
-        self,
-        E: np.ndarray,
-        pts_last_in: np.ndarray,
-        pts_cur_in: np.ndarray,
-    ) -> Optional[Tuple[int, np.ndarray, np.ndarray, np.ndarray]]:
-        best_solution: Optional[Tuple[int, np.ndarray, np.ndarray, np.ndarray]] = None
-        best_score: Optional[Tuple[int, int]] = None
-
-        for candidate in self._essential_candidates(E):
-            try:
-                pose_count, R, t, pose_mask = cv2.recoverPose(candidate, pts_last_in, pts_cur_in, self.K)
-            except cv2.error:
-                continue
-
-            if pose_mask is None:
-                continue
-
-            pose_count = int(pose_count)
-            pose_support = int(pose_mask.reshape(-1).astype(bool).sum())
-            score = (pose_support, pose_count)
-            if best_score is None or score > best_score:
-                best_score = score
-                best_solution = (pose_count, R, t, pose_mask)
-
-        return best_solution
-
-    @staticmethod
-    def _essential_candidates(E: np.ndarray) -> List[np.ndarray]:
-        E = np.asarray(E, dtype=np.float64)
-        if E.size == 9:
-            return [E.reshape(3, 3)]
-
-        candidates: List[np.ndarray] = []
-        if E.ndim != 2:
-            return candidates
-
-        if E.shape[1] == 3 and E.shape[0] % 3 == 0:
-            for row in range(0, E.shape[0], 3):
-                candidates.append(E[row:row + 3, :])
-        elif E.shape[0] == 3 and E.shape[1] % 3 == 0:
-            for col in range(0, E.shape[1], 3):
-                candidates.append(E[:, col:col + 3])
-
-        return [candidate for candidate in candidates if candidate.shape == (3, 3)]
-
-    # ---------------- Triangulation filters ----------------
-
-    def _parallax_norm(self, pts1_px: np.ndarray, pts2_px: np.ndarray) -> np.ndarray:
-        fx = float(self.K[0, 0])
-        fy = float(self.K[1, 1])
-        cx = float(self.K[0, 2])
-        cy = float(self.K[1, 2])
-
-        p1 = np.column_stack(((pts1_px[:, 0] - cx) / fx, (pts1_px[:, 1] - cy) / fy))
-        p2 = np.column_stack(((pts2_px[:, 0] - cx) / fx, (pts2_px[:, 1] - cy) / fy))
-        return np.linalg.norm(p2 - p1, axis=1)
-
-    def _in_front_of_both(self, Tcw1: np.ndarray, Tcw2: np.ndarray, Xw: np.ndarray) -> np.ndarray:
-        Xw_h = _add_ones(Xw).T
-        Xc1 = (Tcw1 @ Xw_h).T
-        Xc2 = (Tcw2 @ Xw_h).T
-
-        z1 = Xc1[:, 2]
-        z2 = Xc2[:, 2]
-
-        finite = np.isfinite(z1) & np.isfinite(z2)
-        in_front = (z1 > self.cfg.min_depth) & (z2 > self.cfg.min_depth)
-        not_too_far = (z1 < self.cfg.max_depth) & (z2 < self.cfg.max_depth)
-
-        return finite & in_front & not_too_far
-
-    # ---------------- Debug rendering ----------------
-
-    @staticmethod
-    def _rotation_angle_deg(R: np.ndarray) -> float:
-        trace_val = float(np.trace(R))
-        cos_theta = float(np.clip((trace_val - 1.0) * 0.5, -1.0, 1.0))
-        return float(math.degrees(math.acos(cos_theta)))
-
-    @staticmethod
-    def _yaw_delta_from_relative_rotation(R: np.ndarray) -> float:
-        return float(math.atan2(float(R[0, 2] - R[2, 0]), float(R[0, 0] + R[2, 2])))
-
-    @staticmethod
-    def _point_coverage(points_xy: np.ndarray, image_shape: Tuple[int, int]) -> float:
-        if points_xy.size == 0:
-            return 0.0
-        h, w = int(image_shape[0]), int(image_shape[1])
-        if h <= 0 or w <= 0:
-            return 0.0
-
-        min_xy = np.min(points_xy, axis=0)
-        max_xy = np.max(points_xy, axis=0)
-
-        box_w = max(1.0, float(max_xy[0] - min_xy[0]))
-        box_h = max(1.0, float(max_xy[1] - min_xy[1]))
-        return float((box_w * box_h) / float(w * h))
-
-    def _annotate_debug_frames(self) -> None:
-        lines = self._debug_overlay_lines()
-        if self._dbg_keypoints_bgr is not None:
-            self._draw_debug_overlay(self._dbg_keypoints_bgr, lines)
-        if self._dbg_matches_bgr is not None:
-            self._draw_debug_overlay(self._dbg_matches_bgr, lines)
-
-    def _debug_overlay_lines(self) -> List[str]:
-        s = self.get_status()
-        return [
-            f"gate={s.gate_reason} track={int(s.tracking_ok)} conf={s.confidence:.2f} blurry={int(s.blurry)}",
-            f"feat={s.feature_count} match={s.match_count}/{s.kept_match_count} e_inl={s.essential_inlier_count} pose_inl={s.recover_pose_count}",
-            f"flow={s.median_flow_px:.2f} frame_d={s.frame_delta_mean:.2f} cov={s.inlier_coverage:.3f} rot={s.rotation_deg:.1f}",
-            f"step={s.requested_step:.2f}->{s.applied_step:.2f} trans={int(s.translation_enabled)}",
-            f"raw=({s.raw_pose_x:.2f},{s.raw_pose_y:.2f},{s.raw_pose_theta:.2f}) filt=({s.filtered_pose_x:.2f},{s.filtered_pose_y:.2f},{s.filtered_pose_theta:.2f})",
-        ]
-
-    @staticmethod
-    def _draw_debug_overlay(img: np.ndarray, lines: List[str]) -> None:
-        y = 20
-        for line in lines:
-            cv2.putText(img, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
-            cv2.putText(img, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-            y += 18
-
-    @staticmethod
-    def _render_keypoints(gray: np.ndarray, pts_xy: np.ndarray) -> np.ndarray:
-        out = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-        for x, y in pts_xy:
-            cv2.circle(out, (int(round(x)), int(round(y))), 2, (0, 255, 0), -1)
-        cv2.putText(
-            out,
-            f"kps: {len(pts_xy)}",
-            (10, 20),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
-        )
-        return out
-
-    def _render_inlier_matches(self, last: _Frame, cur: _Frame, idx_last: np.ndarray, idx_cur: np.ndarray) -> np.ndarray:
-        if idx_last.shape[0] == 0 or idx_cur.shape[0] == 0:
-            return cv2.cvtColor(cur.img_gray, cv2.COLOR_GRAY2BGR)
-
-        if idx_last.shape[0] > self.cfg.debug_max_match_draw:
-            sel = np.linspace(0, idx_last.shape[0] - 1, self.cfg.debug_max_match_draw).astype(np.int64)
-            idx_last = idx_last[sel]
-            idx_cur = idx_cur[sel]
-
-        pts_last = last.kps_xy[idx_last]
-        pts_cur = cur.kps_xy[idx_cur]
-
-        kp_last = [cv2.KeyPoint(float(x), float(y), 20.0) for x, y in pts_last]
-        kp_cur = [cv2.KeyPoint(float(x), float(y), 20.0) for x, y in pts_cur]
-        matches = [cv2.DMatch(_queryIdx=i, _trainIdx=i, _distance=0.0) for i in range(len(kp_last))]
-
-        vis = cv2.drawMatches(
-            last.img_gray,
-            kp_last,
-            cur.img_gray,
-            kp_cur,
-            matches,
-            None,
-            flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
-        )
-        return vis
+__all__ = [
+    "CameraIntrinsics",
+    "ImagePreprocessConfig",
+    "VisualOdometryConfig",
+    "VisualYawUpdate",
+    "ConservativeVisualOdometry",
+]
