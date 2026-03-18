@@ -28,8 +28,8 @@ class LoopConfig:
     pivot_turn_steer_deg: float = 30.0
     pivot_turn_settle_s: float = 0.12
     pivot_turn_ref_speed: int = 26
-    pivot_turn_deg_per_s: float = 38.0
-    pivot_turn_cells_per_deg: float = 0.012
+    pivot_turn_deg_per_s: float = 12.0
+    pivot_turn_cells_per_deg: float = 0.05
 
 
 @dataclass
