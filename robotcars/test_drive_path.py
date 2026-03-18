@@ -23,7 +23,6 @@ class LoopConfig:
     cm_per_grid: float = 50.0
     action_tick_s: float = 0.10
     ultra_stop_cm: float = 20.0
-    debug_flip_horizontal: bool = True
     pivot_turn_heading_deg: float = 45.0
     pivot_turn_exit_deg: float = 20.0
     pivot_turn_steer_deg: float = 30.0
@@ -388,7 +387,6 @@ def drive_path(
                     control_target=TargetPoint(command.target_x, command.target_y),
                     cell_px=14,
                     info_lines=live_info,
-                    flip_horizontal=bool(loop_cfg.debug_flip_horizontal),
                 )
                 cv2.imshow("Planning debug", frame)
                 cv2.waitKey(1)

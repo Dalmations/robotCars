@@ -27,15 +27,6 @@ class GridConfig:
     resolution: float = 1.0
     origin_world: Tuple[float, float] = (0.0, 0.0)
 
-    def center_cell(self) -> Tuple[float, float]:
-        return (self.size[0] / 2.0, self.size[1] / 2.0)
-
-    def set_center_world(self, center_world: Tuple[float, float]) -> None:
-        cx_cell, cy_cell = self.center_cell()
-        ox = float(center_world[0]) - cx_cell * float(self.resolution)
-        oy = float(center_world[1]) - cy_cell * float(self.resolution)
-        self.origin_world = (ox, oy)
-
 
 @dataclass
 class SharedMap:
@@ -95,11 +86,13 @@ class SharedMap:
     ) -> None:
         self.grid.size = size
         self.grid.resolution = float(resolution)
+        self.grid.origin_world = (0.0, 0.0)
 
     def world_to_grid_f(self, x: float, y: float) -> Tuple[float, float]:
         r = float(self.grid.resolution)
-        gx = x / r
-        gy = y / r
+        ox, oy = self.grid.origin_world
+        gx = (float(x) - float(ox)) / r
+        gy = (float(y) - float(oy)) / r
         return gx, gy
 
     def world_to_grid(self, x: float, y: float, *, clamp: bool = True) -> GridPoint:
@@ -114,15 +107,15 @@ class SharedMap:
 
     def grid_to_world_f(self, gx: float, gy: float) -> Tuple[float, float]:
         r = float(self.grid.resolution)
-        x = gx * r
-        y = gy * r
+        ox, oy = self.grid.origin_world
+        x = float(ox) + float(gx) * r
+        y = float(oy) + float(gy) * r
         return x, y
 
     def get_car_grid_position(self, car_id: int = 0) -> GridPoint:
         pose = self.poses.get(car_id)
         if pose is None:
-            cx, cy = self.grid.center_cell()
-            return (int(round(cx)), int(round(cy)))
+            return (0, 0)
         return self.world_to_grid(pose.x, pose.y)
 
     # ---------------- Occupancy ----------------
@@ -215,7 +208,6 @@ class SharedMap:
         cell_px: int = 14,
         margin_px: int = 24,
         info_lines: Optional[List[str]] = None,
-        flip_horizontal: bool = False,
     ) -> np.ndarray:
         """
         Render a 2D planning-grid view showing occupancy, pose, path, and target.
@@ -244,31 +236,24 @@ class SharedMap:
         canvas_w = w * cell_px + 2 * margin_px
         canvas = np.full((canvas_h, canvas_w, 3), 255, dtype=np.uint8)
 
-        def display_x(x_grid: float) -> float:
-            x_grid = float(x_grid)
-            if flip_horizontal:
-                return float(w - 1) - x_grid
-            return x_grid
-
         for gx in range(w):
             for gy in range(h):
-                x0 = margin_px + int(round(display_x(gx))) * cell_px
+                x0 = margin_px + gx * cell_px
                 y0 = header_px + (h - 1 - gy) * cell_px
                 color = obstacle_color if grid[gx, gy] else free_color
                 canvas[y0:y0 + cell_px, x0:x0 + cell_px] = color
 
         def grid_to_px(x_grid: float, y_grid: float) -> Tuple[int, int]:
-            px = int(round(margin_px + (display_x(x_grid) + 0.5) * cell_px))
+            px = int(round(margin_px + (float(x_grid) + 0.5) * cell_px))
             py = int(round(header_px + (h - float(y_grid) - 0.5) * cell_px))
             return px, py
 
         def fill_cell(x_grid: int, y_grid: int, color: Tuple[int, int, int], pad: int = 2) -> None:
             if not (0 <= x_grid < w and 0 <= y_grid < h):
                 return
-            x_disp = int(round(display_x(x_grid)))
-            x0 = margin_px + x_disp * cell_px + pad
+            x0 = margin_px + x_grid * cell_px + pad
             y0 = header_px + (h - 1 - y_grid) * cell_px + pad
-            x1 = margin_px + (x_disp + 1) * cell_px - pad
+            x1 = margin_px + (x_grid + 1) * cell_px - pad
             y1 = header_px + (h - y_grid) * cell_px - pad
             if x1 <= x0 or y1 <= y0:
                 return
