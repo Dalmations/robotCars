@@ -83,10 +83,14 @@ class SharedMap:
         *,
         size: Tuple[int, int] = (50, 50),
         resolution: float = 1.0,
+        origin_world: Tuple[float, float] = (0.0, 0.0),
     ) -> None:
         self.grid.size = size
         self.grid.resolution = float(resolution)
-        self.grid.origin_world = (0.0, 0.0)
+        self.grid.origin_world = (
+            float(origin_world[0]),
+            float(origin_world[1]),
+        )
 
     def world_to_grid_f(self, x: float, y: float) -> Tuple[float, float]:
         r = float(self.grid.resolution)

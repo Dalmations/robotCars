@@ -19,6 +19,7 @@ def build_shared_map() -> SharedMap:
     shared_map.configure_grid(
         size=(30, 30),
         resolution=1.0,
+        origin_world=(-10.0, -10.0),
     )
     shared_map.set_pose(0, Pose(0.0, 0.0, 0.0))
     return shared_map
