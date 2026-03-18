@@ -1,206 +1,93 @@
-# main.py
+# Main entry point for the drive-path demo.
+# Builds the shared map, motor, follower, and a fixed shape path, then follows it once.
 from __future__ import annotations
 
 import time
-import math
-from dataclasses import dataclass
-from typing import Optional, Tuple, Any
 
-import numpy as np
 import cv2
 
+from car_tools.movement import build_equilateral_triangle_route, build_square_route, route_to_path
+from car_tools.motor_controller import MotorConfig, MotorController
+from car_tools.picarx_path_follower import FollowerConfig, PathFollower
 from coordination.shared_map import SharedMap
-from car_tools.movement import MovementPlanner, PlanningConfig
-from car_tools.motor_controller import MotorController, MotorConfig
-from car_tools.picarx_path_follower import PathFollower, FollowerConfig
-from car_tools.camera_input import PiCarXCamera, CameraConfig
-from car_tools.obstacle_detection import MonocularVSLAM, CameraIntrinsics, VslamConfig
-from model import TargetPoint, Pose
+from model import Path, Pose
+from test_drive_path import LoopConfig, drive_path
 
 
-def dist2(a: Tuple[float, float], b: Tuple[float, float]) -> float:
-    dx = a[0] - b[0]
-    dy = a[1] - b[1]
-    return dx * dx + dy * dy
+def build_shared_map() -> SharedMap:
+    shared_map = SharedMap()
+    shared_map.configure_grid(
+        size=(30, 30),
+        resolution=1.0,
+        origin_world=(-10.0, -10.0),
+    )
+    shared_map.set_pose(0, Pose(0.0, 0.0, 0.0))
+    return shared_map
 
 
-def drive_to_grid_goal(
-    *,
-    goal_gx: int,
-    goal_gy: int,
-    shared_map: SharedMap,
-    planner: MovementPlanner,
-    follower: PathFollower,
-    motor: MotorController,
-    slam: MonocularVSLAM,
-    camera: PiCarXCamera,
-    car_id: int = 0,
-    timeout_s: float = 90.0,
-    debug_show_keypoints: bool = True,
-) -> bool:
-    """
-    Replan every 5s and execute pure-pursuit step.
-    This is the simplest “closed loop” to combine SLAM pose + A*.
-    """
-    t0 = time.time()
-    goal = TargetPoint(x=float(goal_gx), y=float(goal_gy))
-    repathCount = 0
-    while (time.time() - t0) < timeout_s:
-        # 1) SLAM update
-        frame = camera.read()
-        if frame is not None:
-            slam.tick(frame)
-
-            if debug_show_keypoints:
-                dbg = slam.get_debug_keypoints_frame()
-                if dbg is not None:
-                    cv2.imshow("SLAM keypoints", dbg)
-                    cv2.waitKey(1)
-
-        # Pose in grid frame
-        pose: Optional[Pose] = shared_map.get_pose(car_id, frame="grid")
-        if pose is None:
-            time.sleep(follower.cfg.dt)
-            continue
-
-        # Check goal
-        if math.hypot(goal.x - pose.x, goal.y - pose.y) <= follower.cfg.goal_tolerance:
-            motor.stop()
-            motor.mark_reached()
-            return True
-
-        # Re plan path to goal every 5s
-        if repathCount * 5 > (time.time() - t0):
-            repathCount += 1
-            path = planner.plan_to_target(goal, shared_map, target_frame="grid")
-
-            if path is None or len(path.waypoints) < 2:
-                # Nothing to follow safely
-                motor.stop()
-                time.sleep(follower.cfg.dt)
-                continue
-
-            # Pure pursuit steer
-            tx, ty = follower._lookahead_point(path, pose, follower.cfg.lookahead)
-            delta_rad = follower._pure_pursuit_delta(pose, target_x=tx, target_y=ty)
-            steer_deg = math.degrees(delta_rad)
-            # MotorController handles sign/gain/offset/clamp
-            motor.set_steering(steer_deg)
-            motor.forward_for(follower.cfg.dt)
-
-    motor.stop()
-    return False
+def build_motor() -> MotorController:
+    return MotorController(MotorConfig(
+        speed=26,                                 # default drive speed
+        settle_seconds=0.01,                      # servo settle pause
+    ))
 
 
-# ---------------- Main behaviors ----------------
+def build_follower(motor: MotorController) -> PathFollower:
+    return PathFollower(motor, FollowerConfig(
+        lookahead=5.0,                            # pure pursuit lookahead distance
+        wheelbase=1.0,                           # front to back wheel wheelbase
+        goal_tolerance=0.6,                       # goal reached radius
+        steer_sign=1.0,                           # follower steering sign
+        steer_alpha=0.25,                         # steering smoother
+        steer_deadband_deg=2.0,                   # ignore tiny steer changes
+        steer_rate_limit_deg_per_tick=12.0,       # max steer change
+        dock_distance_grid=8.0,                   # near goal threshold
+        dock_min_lookahead_grid=1.5,              # minimum dock lookahead
+    ))
+
+
+def build_loop_config() -> LoopConfig:
+    return LoopConfig(
+        cm_per_grid= 20,                           # centimeters per cell
+    )
+
+
+def build_route(shared_map: SharedMap) -> list[tuple[int, int]]:
+    start_grid = shared_map.get_car_grid_position(0)
+    # route = build_equilateral_triangle_route(start_grid, side_cells=6)
+    route = build_square_route(start_grid, side_cells=6)
+    return [
+        *route,
+    ]
+
+
+def build_path(shared_map: SharedMap) -> Path:
+    return route_to_path(build_route(shared_map))
+
 
 def main() -> None:
-    shared_map = SharedMap()
-    shared_map.configure_grid(size=(50, 50), resolution=1.0, origin_world=(-2.0, -2.0))
-
-    # grid = np.zeros((50, 50), dtype=np.int32)
-    # grid[20:30, 25:27] = 1  # a vertical wall
-    # shared_map.set_static_occupancy_grid(grid)
-
-    # --- Camera ---
-    cam = PiCarXCamera(CameraConfig(
-        display_web=False,
-        display_local=False,
-        frame_size=(640, 480),
-    ))
-    cam.start()
-
-    # --- SLAM ---
-    intr = CameraIntrinsics(fx=520.0, fy=520.0, cx=320.0, cy=240.0)
-
-    slam_cfg = VslamConfig(
-        translation_step=1.0,
-        debug_draw_keypoints=True,  # set True if you want to see keypoints
-        debug_draw_matches=False,
-    )
-    slam = MonocularVSLAM(intr, shared_map, car_id=0, cfg=slam_cfg)
-
-    # Warm up SLAM a few frames
-    for _ in range(10):
-        fr = cam.read()
-        if fr is not None:
-            slam.tick(fr)
-        time.sleep(0.05)
-
-    # --- Planner ---
-    planning_cfg = PlanningConfig(
-        include_slam_points=False,
-        inflation_radius_cells=2,      # recommended start for real robot
-        simplify_path=True,
-        nudge_start_goal=True,
-    )
-    planner = MovementPlanner(planning_cfg=planning_cfg, world_size=(50, 50))
-
-    # --- Motor + Follower ---
-    motor = MotorController(MotorConfig(
-        speed=45,                 # start slow
-        steer_sign=1.0,           # flip to -1.0 if mirrored
-        steer_offset_deg=0.0,     # tune so set_steering(0) drives straight
-        steer_gain=1.0,
-        max_steer_deg=35.0,
-        brake_between_steps=True,
-    ))
-
-    follower = PathFollower(motor, FollowerConfig(
-        dt=0.50,
-        lookahead=12.0,            # good start for 8-connected + simplified path
-        wheelbase=2.5,            # effective parameter (tune)
-        goal_tolerance=2.0,
-        max_run_seconds=9999.0,
-        pose_frame="grid",
-        steer_sign=1.0,           # keep neutral; MotorController owns sign
-        max_steer_deg=motor.cfg.max_steer_deg,
-    ))
+    shared_map = build_shared_map()
+    motor = build_motor()
+    follower = build_follower(motor)
+    loop_cfg = build_loop_config()
+    path = build_path(shared_map)
 
     try:
-        # ------------------
-        # Task 1: (2,2) -> (45,45)
-        # ------------------
-        print("Driving to (45,45)...")
-        ok = drive_to_grid_goal(
-            goal_gx=45, goal_gy=45,
+        route = [(int(round(wp.x)), int(round(wp.y))) for wp in path.waypoints]
+        print("Drive route:", route)
+        ok = drive_path(
+            path,
             shared_map=shared_map,
-            planner=planner,
             follower=follower,
             motor=motor,
-            slam=slam,
-            camera=cam,
-            timeout_s=120.0,
-            debug_show_keypoints=True,
+            loop_cfg=loop_cfg,
+            timeout_s=180.0,
+            debug_show_grid=True,
         )
-        print("Reached (45,45):", ok)
-
-        # ------------------
-        # Task 2: drive a square
-        #   We'll use a safe square inside bounds:
-        #   (45,45) -> (5,45) -> (5,5) -> (45,5) -> (45,45)
-        # ------------------
-        square = [(45, 45), (5, 45), (5, 5), (45, 5), (45, 45)]
-        print("Driving square corners:", square)
-
-        for (gx, gy) in square[1:]:
-            ok = drive_to_grid_goal(
-                goal_gx=gx, goal_gy=gy,
-                shared_map=shared_map,
-                planner=planner,
-                follower=follower,
-                motor=motor,
-                slam=slam,
-                camera=cam,
-                timeout_s=120.0,
-                debug_show_keypoints=True,
-            )
-            print(f"Reached ({gx},{gy}):", ok)
-            time.sleep(0.5)
-
+        print(f"Completed path to {route[-1]}:", ok)
+        time.sleep(0.5)
     finally:
         motor.stop()
-        cam.stop()
         try:
             cv2.destroyAllWindows()
         except Exception:
