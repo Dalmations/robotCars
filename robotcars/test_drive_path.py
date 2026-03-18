@@ -21,12 +21,9 @@ from model import Path, Pose, TargetPoint
 @dataclass
 class LoopConfig:
     cm_per_grid: float = 50.0
-    ahead_cm_min: float = 5.0
-    ahead_cm_max: float = 120.0
     action_tick_s: float = 0.10
     ultra_stop_cm: float = 20.0
-    ultra_caution_cm: float = 40.0
-    ultra_caution_speed_scale: float = 0.6
+    debug_flip_horizontal: bool = True
     pivot_turn_heading_deg: float = 45.0
     pivot_turn_exit_deg: float = 20.0
     pivot_turn_steer_deg: float = 30.0
@@ -161,8 +158,6 @@ def _tick_ultrasonic(
             pose_world=pose_world,
             dist_cm=dist_cm,
             cm_per_grid=loop_cfg.cm_per_grid,
-            ahead_cm_min=loop_cfg.ahead_cm_min,
-            ahead_cm_max=loop_cfg.ahead_cm_max,
         )
 
     return dist_cm
@@ -286,13 +281,6 @@ def drive_path(
                 drive_speed = 0
                 time.sleep(float(loop_cfg.action_tick_s))
             else:
-                if latest_ultra_cm is not None and latest_ultra_cm <= float(loop_cfg.ultra_caution_cm):
-                    drive_mode = "track_caution"
-                    drive_speed = max(
-                        1,
-                        int(round(float(motor.cfg.speed) * float(loop_cfg.ultra_caution_speed_scale))),
-                    )
-
                 if pivot_active:
                     heading_error_deg = _heading_error_to_point_deg(pose_grid, active_wp)
                     target_x = float(active_wp.x)
@@ -400,6 +388,7 @@ def drive_path(
                     control_target=TargetPoint(command.target_x, command.target_y),
                     cell_px=14,
                     info_lines=live_info,
+                    flip_horizontal=bool(loop_cfg.debug_flip_horizontal),
                 )
                 cv2.imshow("Planning debug", frame)
                 cv2.waitKey(1)
