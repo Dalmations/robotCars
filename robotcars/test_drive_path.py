@@ -27,6 +27,8 @@ class LoopConfig:
     pivot_turn_exit_deg: float = 20.0
     pivot_turn_steer_deg: float = 30.0
     pivot_turn_settle_s: float = 0.12
+    pivot_turn_ref_speed: int = 26
+    pivot_turn_deg_per_s: float = 38.0
 
 
 @dataclass
@@ -58,10 +60,8 @@ def _heading_error_to_point_deg(pose: Pose, target: TargetPoint) -> float:
 
 def _pivot_reverse_duration_s(
     *,
-    follower: PathFollower,
     loop_cfg: LoopConfig,
     drive_speed: int,
-    speed_ref: int,
     heading_error_deg: float,
 ) -> float:
     remaining_error_deg = max(
@@ -71,29 +71,32 @@ def _pivot_reverse_duration_s(
     if remaining_error_deg <= 1e-6:
         return 0.0
 
-    steer_deg = min(
-        abs(float(loop_cfg.pivot_turn_steer_deg)),
-        float(follower.cfg.max_steer_deg),
-    )
-    step_per_second = estimate_step_cells_for_duration(
-        1.0,
-        action_tick_s=float(loop_cfg.action_tick_s),
-        speed=drive_speed,
-        speed_ref=speed_ref,
-    )
-    yaw_per_second = abs(
-        follower.estimate_ackermann_yaw_delta(
-            -step_per_second,
-            steer_deg,
-        )
-    )
-    if yaw_per_second <= 1e-9:
+    ref_speed = max(1.0, float(loop_cfg.pivot_turn_ref_speed))
+    yaw_deg_per_s = float(loop_cfg.pivot_turn_deg_per_s) * (float(drive_speed) / ref_speed)
+    if yaw_deg_per_s <= 1e-6:
         return float(loop_cfg.action_tick_s)
 
     return max(
         float(loop_cfg.action_tick_s),
-        math.radians(remaining_error_deg) / yaw_per_second,
+        remaining_error_deg / yaw_deg_per_s,
     )
+
+
+def _pivot_reverse_yaw_delta_rad(
+    *,
+    loop_cfg: LoopConfig,
+    drive_speed: int,
+    heading_error_deg: float,
+    duration_s: float,
+) -> float:
+    ref_speed = max(1.0, float(loop_cfg.pivot_turn_ref_speed))
+    yaw_deg_per_s = float(loop_cfg.pivot_turn_deg_per_s) * (float(drive_speed) / ref_speed)
+    yaw_deg = min(
+        max(0.0, abs(float(heading_error_deg)) - float(loop_cfg.pivot_turn_exit_deg)),
+        yaw_deg_per_s * float(duration_s),
+    )
+    direction_sign = 1.0 if float(heading_error_deg) >= 0.0 else -1.0
+    return math.radians(direction_sign * yaw_deg)
 
 
 def _path_length(path: Path) -> float:
@@ -296,10 +299,8 @@ def drive_path(
                         float(follower.cfg.max_steer_deg),
                     )
                     pivot_duration_s = _pivot_reverse_duration_s(
-                        follower=follower,
                         loop_cfg=loop_cfg,
                         drive_speed=drive_speed,
-                        speed_ref=int(motor.cfg.speed),
                         heading_error_deg=heading_error_deg,
                     )
                     drive_mode = "pivot_turn_reverse"
@@ -318,6 +319,12 @@ def drive_path(
                         speed=drive_speed,
                         speed_ref=int(motor.cfg.speed),
                     )
+                    yaw_delta = _pivot_reverse_yaw_delta_rad(
+                        loop_cfg=loop_cfg,
+                        drive_speed=drive_speed,
+                        heading_error_deg=heading_error_deg,
+                        duration_s=pivot_duration_s,
+                    )
                     motor.backward_for(pivot_duration_s, speed=drive_speed)
                     follower.sync_to_motor_steering()
                 else:
@@ -329,11 +336,10 @@ def drive_path(
                     )
                     odom_steer_deg = motor.get_applied_steering_deg()
                     motor.forward_for(float(loop_cfg.action_tick_s), speed=drive_speed)
-
-                yaw_delta = follower.estimate_ackermann_yaw_delta(
-                    odom_step_cells,
-                    odom_steer_deg,
-                )
+                    yaw_delta = follower.estimate_ackermann_yaw_delta(
+                        odom_step_cells,
+                        odom_steer_deg,
+                    )
                 odom_yaw_deg = math.degrees(yaw_delta)
                 integrate_dead_reckoning(
                     shared_map=shared_map,
