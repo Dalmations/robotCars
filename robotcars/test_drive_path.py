@@ -27,6 +27,10 @@ class LoopConfig:
     ultra_stop_cm: float = 20.0
     ultra_caution_cm: float = 40.0
     ultra_caution_speed_scale: float = 0.6
+    pivot_turn_heading_deg: float = 90.0
+    pivot_turn_speed_scale: float = 0.75
+    pivot_turn_steer_min_deg: float = 8.0
+    pivot_turn_steer_gain: float = 0.14
 
 
 @dataclass
@@ -160,6 +164,7 @@ def drive_path(
     last_ultra_tick_t = 0.0
     latest_ultra_cm: Optional[float] = None
     t0 = time.time()
+    pivot_reverse_phase = True
     follower.reset()
 
     try:
@@ -210,6 +215,7 @@ def drive_path(
                 drive_speed = 0
                 time.sleep(float(loop_cfg.action_tick_s))
             else:
+                pivot_active = abs(float(heading_error_deg)) > float(loop_cfg.pivot_turn_heading_deg)
                 if latest_ultra_cm is not None and latest_ultra_cm <= float(loop_cfg.ultra_caution_cm):
                     drive_mode = "track_caution"
                     drive_speed = max(
@@ -217,20 +223,59 @@ def drive_path(
                         int(round(float(motor.cfg.speed) * float(loop_cfg.ultra_caution_speed_scale))),
                     )
 
-                odom_step_cells = estimate_step_cells_for_duration(
-                    float(loop_cfg.action_tick_s),
-                    action_tick_s=float(loop_cfg.action_tick_s),
-                    speed=drive_speed,
-                    speed_ref=int(motor.cfg.speed),
-                )
-                odom_steer_deg = motor.get_applied_steering_deg()
+                if pivot_active:
+                    direction_sign = 1.0 if float(heading_error_deg) >= 0.0 else -1.0
+                    steer_abs = min(
+                        float(follower.cfg.max_steer_deg),
+                        max(
+                            float(loop_cfg.pivot_turn_steer_min_deg),
+                            float(loop_cfg.pivot_turn_steer_gain) * abs(float(heading_error_deg)),
+                        ),
+                    )
+                    drive_speed = max(
+                        1,
+                        int(round(float(drive_speed) * float(loop_cfg.pivot_turn_speed_scale))),
+                    )
+                    if pivot_reverse_phase:
+                        drive_mode = "pivot_turn_reverse"
+                        motor.set_steering(-direction_sign * steer_abs)
+                        odom_steer_deg = motor.get_applied_steering_deg()
+                        odom_step_cells = -estimate_step_cells_for_duration(
+                            float(loop_cfg.action_tick_s),
+                            action_tick_s=float(loop_cfg.action_tick_s),
+                            speed=drive_speed,
+                            speed_ref=int(motor.cfg.speed),
+                        )
+                        motor.backward_for(float(loop_cfg.action_tick_s), speed=drive_speed)
+                    else:
+                        drive_mode = "pivot_turn_forward"
+                        motor.set_steering(direction_sign * steer_abs)
+                        odom_steer_deg = motor.get_applied_steering_deg()
+                        odom_step_cells = estimate_step_cells_for_duration(
+                            float(loop_cfg.action_tick_s),
+                            action_tick_s=float(loop_cfg.action_tick_s),
+                            speed=drive_speed,
+                            speed_ref=int(motor.cfg.speed),
+                        )
+                        motor.forward_for(float(loop_cfg.action_tick_s), speed=drive_speed)
+                    pivot_reverse_phase = not pivot_reverse_phase
+                    follower.sync_to_motor_steering()
+                else:
+                    pivot_reverse_phase = True
+                    odom_step_cells = estimate_step_cells_for_duration(
+                        float(loop_cfg.action_tick_s),
+                        action_tick_s=float(loop_cfg.action_tick_s),
+                        speed=drive_speed,
+                        speed_ref=int(motor.cfg.speed),
+                    )
+                    odom_steer_deg = motor.get_applied_steering_deg()
+                    motor.forward_for(float(loop_cfg.action_tick_s), speed=drive_speed)
+
                 yaw_delta = follower.estimate_ackermann_yaw_delta(
                     odom_step_cells,
                     odom_steer_deg,
                 )
                 odom_yaw_deg = math.degrees(yaw_delta)
-
-                motor.forward_for(float(loop_cfg.action_tick_s), speed=drive_speed)
                 integrate_dead_reckoning(
                     shared_map=shared_map,
                     car_id=car_id,
