@@ -27,7 +27,6 @@ class LoopConfig:
     pivot_turn_exit_deg: float = 20.0
     pivot_turn_steer_deg: float = 30.0
     pivot_turn_settle_s: float = 0.12
-    pivot_turn_ref_speed: int = 26
     pivot_turn_deg_per_s: float = 12.0
     pivot_turn_cells_per_deg: float = 0.05
 
@@ -68,7 +67,6 @@ def _heading_error_to_point_deg(pose: Pose, target: TargetPoint) -> float:
 def _pivot_reverse_duration_s(
     *,
     loop_cfg: LoopConfig,
-    drive_speed: int,
     heading_error_deg: float,
 ) -> float:
     remaining_error_deg = max(
@@ -78,8 +76,7 @@ def _pivot_reverse_duration_s(
     if remaining_error_deg <= 1e-6:
         return 0.0
 
-    ref_speed = max(1.0, float(loop_cfg.pivot_turn_ref_speed))
-    yaw_deg_per_s = float(loop_cfg.pivot_turn_deg_per_s) * (float(drive_speed) / ref_speed)
+    yaw_deg_per_s = float(loop_cfg.pivot_turn_deg_per_s)
     if yaw_deg_per_s <= 1e-6:
         return float(loop_cfg.action_tick_s)
 
@@ -92,12 +89,10 @@ def _pivot_reverse_duration_s(
 def _pivot_reverse_yaw_delta_rad(
     *,
     loop_cfg: LoopConfig,
-    drive_speed: int,
     heading_error_deg: float,
     duration_s: float,
 ) -> float:
-    ref_speed = max(1.0, float(loop_cfg.pivot_turn_ref_speed))
-    yaw_deg_per_s = float(loop_cfg.pivot_turn_deg_per_s) * (float(drive_speed) / ref_speed)
+    yaw_deg_per_s = float(loop_cfg.pivot_turn_deg_per_s)
     yaw_deg = min(
         max(0.0, abs(float(heading_error_deg)) - float(loop_cfg.pivot_turn_exit_deg)),
         yaw_deg_per_s * float(duration_s),
@@ -316,7 +311,6 @@ def drive_path(
                     )
                     pivot_duration_s = _pivot_reverse_duration_s(
                         loop_cfg=loop_cfg,
-                        drive_speed=drive_speed,
                         heading_error_deg=heading_error_deg,
                     )
                     drive_mode = "pivot_turn_reverse"
@@ -331,7 +325,6 @@ def drive_path(
                     steer_deg = odom_steer_deg
                     yaw_delta = _pivot_reverse_yaw_delta_rad(
                         loop_cfg=loop_cfg,
-                        drive_speed=drive_speed,
                         heading_error_deg=heading_error_deg,
                         duration_s=pivot_duration_s,
                     )
