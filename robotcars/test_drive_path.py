@@ -26,6 +26,7 @@ class LoopConfig:
     pivot_turn_heading_deg: float = 45.0
     pivot_turn_exit_deg: float = 20.0
     pivot_turn_steer_deg: float = 30.0
+    pivot_turn_settle_s: float = 0.12
 
 
 @dataclass
@@ -303,6 +304,12 @@ def drive_path(
                     )
                     drive_mode = "pivot_turn_reverse"
                     motor.set_steering(-direction_sign * steer_abs)
+                    extra_pivot_settle_s = max(
+                        0.0,
+                        float(loop_cfg.pivot_turn_settle_s) - float(getattr(motor.cfg, "settle_seconds", 0.0)),
+                    )
+                    if extra_pivot_settle_s > 1e-6:
+                        time.sleep(extra_pivot_settle_s)
                     odom_steer_deg = motor.get_applied_steering_deg()
                     steer_deg = odom_steer_deg
                     odom_step_cells = -estimate_step_cells_for_duration(
