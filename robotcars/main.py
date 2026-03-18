@@ -34,7 +34,7 @@ def build_motor() -> MotorController:
 def build_follower(motor: MotorController) -> PathFollower:
     return PathFollower(motor, FollowerConfig(
         lookahead=5.0,                            # pure pursuit lookahead distance
-        wheelbase=0.75,                           # front to back wheel wheelbase
+        wheelbase=1.0,                           # front to back wheel wheelbase
         goal_tolerance=0.6,                       # goal reached radius
         steer_sign=1.0,                           # follower steering sign
         steer_alpha=0.25,                         # steering smoother
@@ -47,7 +47,7 @@ def build_follower(motor: MotorController) -> PathFollower:
 
 def build_loop_config() -> LoopConfig:
     return LoopConfig(
-        cm_per_grid=15,                           # centimeters per cell
+        cm_per_grid= 20,                           # centimeters per cell
     )
 
 
