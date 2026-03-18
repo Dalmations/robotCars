@@ -29,6 +29,7 @@ class LoopConfig:
     pivot_turn_settle_s: float = 0.12
     pivot_turn_ref_speed: int = 26
     pivot_turn_deg_per_s: float = 38.0
+    pivot_turn_cells_per_deg: float = 0.012
 
 
 @dataclass
@@ -44,9 +45,15 @@ class DriveCommand:
     odom_steer_deg: float = 0.0
 
 
-def _remaining_path(path: Path, waypoint_idx: int) -> Path:
-    start_idx = max(0, int(waypoint_idx) - 1)
-    return Path(waypoints=list(path.waypoints[start_idx:]))
+def _current_leg_path(path: Path, waypoint_idx: int) -> Path:
+    if path is None or not path.waypoints:
+        return Path(waypoints=[])
+
+    end_idx = max(0, min(int(waypoint_idx), len(path.waypoints) - 1))
+    start_idx = max(0, end_idx - 1)
+    if start_idx == end_idx:
+        return Path(waypoints=[path.waypoints[end_idx]])
+    return Path(waypoints=[path.waypoints[start_idx], path.waypoints[end_idx]])
 
 
 def _heading_error_to_point_deg(pose: Pose, target: TargetPoint) -> float:
@@ -97,6 +104,15 @@ def _pivot_reverse_yaw_delta_rad(
     )
     direction_sign = 1.0 if float(heading_error_deg) >= 0.0 else -1.0
     return math.radians(direction_sign * yaw_deg)
+
+
+def _pivot_reverse_step_cells(
+    *,
+    loop_cfg: LoopConfig,
+    yaw_delta_rad: float,
+) -> float:
+    yaw_deg = abs(math.degrees(float(yaw_delta_rad)))
+    return -yaw_deg * max(0.0, float(loop_cfg.pivot_turn_cells_per_deg))
 
 
 def _path_length(path: Path) -> float:
@@ -263,9 +279,9 @@ def drive_path(
                 return True
 
             active_wp = path.waypoints[current_wp_idx]
-            remaining_path = _remaining_path(path, current_wp_idx)
+            tracking_path = _current_leg_path(path, current_wp_idx)
             target_x, target_y, heading_error_deg, steer_deg = follower.tracking_command(
-                remaining_path,
+                tracking_path,
                 pose_grid,
                 d_goal,
                 steer_cap_deg=follower.cfg.max_steer_deg,
@@ -313,17 +329,15 @@ def drive_path(
                         time.sleep(extra_pivot_settle_s)
                     odom_steer_deg = motor.get_applied_steering_deg()
                     steer_deg = odom_steer_deg
-                    odom_step_cells = -estimate_step_cells_for_duration(
-                        pivot_duration_s,
-                        action_tick_s=float(loop_cfg.action_tick_s),
-                        speed=drive_speed,
-                        speed_ref=int(motor.cfg.speed),
-                    )
                     yaw_delta = _pivot_reverse_yaw_delta_rad(
                         loop_cfg=loop_cfg,
                         drive_speed=drive_speed,
                         heading_error_deg=heading_error_deg,
                         duration_s=pivot_duration_s,
+                    )
+                    odom_step_cells = _pivot_reverse_step_cells(
+                        loop_cfg=loop_cfg,
+                        yaw_delta_rad=yaw_delta,
                     )
                     motor.backward_for(pivot_duration_s, speed=drive_speed)
                     follower.sync_to_motor_steering()
