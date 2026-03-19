@@ -8,7 +8,6 @@ import cv2
 import numpy as np
 
 from model import Pose
-from coordination.shared_map import SharedMap
 
 
 @dataclass
@@ -137,15 +136,11 @@ class MonocularVSLAM:
     def __init__(
         self,
         intr: CameraIntrinsics,
-        shared_map: SharedMap,
-        car_id: int = 0,
         cfg: Optional[VslamConfig] = None,
     ):
         self.cfg = cfg or VslamConfig()
         self.K = intr.K()
         self.dist_coeffs = intr.dist()
-        self.shared_map = shared_map
-        self.car_id = car_id
 
         self._pose_filt: Optional[Pose] = None
         self._status = VslamStatus()
@@ -163,8 +158,6 @@ class MonocularVSLAM:
         self._aruco_detector = None
 
         self._init_origin_box_detector()
-
-        self._publish_pose()
 
     # ---------------- Public diagnostics ----------------
 
@@ -195,6 +188,11 @@ class MonocularVSLAM:
             origin_pose_y=float(s.origin_pose_y),
             origin_pose_theta=float(s.origin_pose_theta),
         )
+
+    def get_pose(self) -> Optional[Pose]:
+        if self._pose_filt is None:
+            return None
+        return Pose(self._pose_filt.x, self._pose_filt.y, self._pose_filt.theta)
 
     def slam_quality(self, *, min_confidence: float = 0.55) -> Tuple[float, bool, bool, bool, float]:
         s = self.get_status()
@@ -234,9 +232,9 @@ class MonocularVSLAM:
                 gate_reason="origin_not_visible",
                 origin_area_ratio=0.0,
             )
-            self._publish_pose(update_filter=False)
+            self._update_pose_filter(update_filter=False)
             self._annotate_debug_frames()
-            return self.shared_map.poses.get(self.car_id)
+            return None
 
         self._Tcw = self._planar_pose_to_Tcw(origin_obs.pose_world)
         self._record_origin_status(origin_obs, True)
@@ -251,13 +249,13 @@ class MonocularVSLAM:
             gate_reason="origin_visible",
             origin_area_ratio=float(origin_obs.area_ratio),
         )
-        self._publish_pose()
+        self._update_pose_filter()
         self._annotate_debug_frames()
-        return self.shared_map.poses.get(self.car_id)
+        return self.get_pose()
 
-    # ---------------- Pose publishing ----------------
+    # ---------------- Pose filtering ----------------
 
-    def _publish_pose(self, *, update_filter: bool = True) -> None:
+    def _update_pose_filter(self, *, update_filter: bool = True) -> None:
         raw_pose = self._planar_pose_from_Tcw(self._Tcw)
 
         if update_filter or self._pose_filt is None:
@@ -276,8 +274,6 @@ class MonocularVSLAM:
                 thf = math.atan2(sf, cf)
 
                 self._pose_filt = Pose(x=float(xf), y=float(yf), theta=float(thf))
-
-        self.shared_map.set_pose(self.car_id, self._pose_filt)
 
     def _planar_pose_from_Tcw(self, Tcw: np.ndarray) -> Pose:
         Twc = self._invert_se3(Tcw)

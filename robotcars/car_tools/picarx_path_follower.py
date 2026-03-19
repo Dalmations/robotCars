@@ -42,17 +42,28 @@ def integrate_dead_reckoning(
     if pose_world is None:
         pose_world = Pose(0.0, 0.0, 0.0)
 
+    return predict_dead_reckoning_pose(
+        pose_world,
+        forward_step=forward_step,
+        yaw_delta=yaw_delta,
+    )
+
+
+def predict_dead_reckoning_pose(
+    pose_world: Pose,
+    *,
+    forward_step: float,
+    yaw_delta: float,
+) -> Pose:
     step = float(forward_step)
     dtheta = float(yaw_delta)
     theta_mid = float(pose_world.theta) + 0.5 * dtheta
 
-    next_pose = Pose(
+    return Pose(
         x=float(pose_world.x + step * math.cos(theta_mid)),
         y=float(pose_world.y + step * math.sin(theta_mid)),
         theta=float(wrap_angle(float(pose_world.theta) + dtheta)),
     )
-    shared_map.set_pose(car_id, next_pose)
-    return next_pose
 
 @dataclass
 class FollowerConfig:

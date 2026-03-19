@@ -9,6 +9,7 @@ import cv2
 from car_tools.movement import build_equilateral_triangle_route, build_square_route, route_to_path
 from car_tools.motor_controller import MotorConfig, MotorController
 from car_tools.picarx_path_follower import FollowerConfig, PathFollower
+from coordination.localization_manager import LocalizationManager
 from coordination.shared_map import SharedMap
 from model import Path, Pose
 from test_drive_path import LoopConfig, drive_path
@@ -21,8 +22,15 @@ def build_shared_map() -> SharedMap:
         resolution=1.0,
         origin_world=(-10.0, -10.0),
     )
-    shared_map.set_pose(0, Pose(0.0, 0.0, 0.0))
     return shared_map
+
+
+def build_localization(shared_map: SharedMap) -> LocalizationManager:
+    return LocalizationManager(
+        shared_map=shared_map,
+        car_id=0,
+        initial_pose=Pose(0.0, 0.0, 0.0),
+    )
 
 
 def build_motor() -> MotorController:
@@ -67,6 +75,7 @@ def build_path(shared_map: SharedMap) -> Path:
 
 def main() -> None:
     shared_map = build_shared_map()
+    localization = build_localization(shared_map)
     motor = build_motor()
     follower = build_follower(motor)
     loop_cfg = build_loop_config()
@@ -78,6 +87,7 @@ def main() -> None:
         ok = drive_path(
             path,
             shared_map=shared_map,
+            localization=localization,
             follower=follower,
             motor=motor,
             loop_cfg=loop_cfg,

@@ -3,17 +3,18 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 import cv2
+import numpy as np
 
 from car_tools.camera_input import read_ultrasonic_cm
+from coordination.localization_manager import LocalizationManager
 from coordination.shared_map import SharedMap
 from car_tools.motor_controller import MotorController
 from car_tools.picarx_path_follower import (
     PathFollower,
     estimate_step_cells_for_duration,
-    integrate_dead_reckoning,
 )
 from model import Path, Pose, TargetPoint
 
@@ -177,6 +178,46 @@ def _tick_ultrasonic(
     return dist_cm
 
 
+def _read_marker_frame(
+    marker_frame_provider: Optional[Callable[[], Optional[np.ndarray]]],
+) -> Optional[np.ndarray]:
+    if marker_frame_provider is None:
+        return None
+    try:
+        return marker_frame_provider()
+    except Exception:
+        return None
+
+
+def _read_camera_pan_deg(
+    camera_pan_provider: Optional[Callable[[], Optional[float]]],
+) -> float:
+    if camera_pan_provider is None:
+        return 0.0
+    try:
+        pan_deg = camera_pan_provider()
+    except Exception:
+        return 0.0
+    if pan_deg is None or not math.isfinite(float(pan_deg)):
+        return 0.0
+    return float(pan_deg)
+
+
+def _tick_marker_localization(
+    *,
+    localization: LocalizationManager,
+    marker_frame_provider: Optional[Callable[[], Optional[np.ndarray]]],
+    camera_pan_provider: Optional[Callable[[], Optional[float]]],
+) -> None:
+    frame = _read_marker_frame(marker_frame_provider)
+    if frame is None:
+        return
+    localization.correct_from_marker_frame(
+        frame,
+        camera_pan_deg=_read_camera_pan_deg(camera_pan_provider),
+    )
+
+
 def _log_drive_status(
     *,
     pose_grid: Pose,
@@ -193,6 +234,8 @@ def _log_drive_status(
     steer_deg: float,
     drive_mode: str,
     speed: int,
+    pose_source: str,
+    marker_visible: bool,
 ) -> None:
     ultra_str = "None" if dist_cm is None else f"{round(dist_cm, 1)}cm"
     print(
@@ -203,7 +246,8 @@ def _log_drive_status(
         f"ultra={ultra_str} path_n={path_len} "
         f"target=({target_xy[0]:.1f},{target_xy[1]:.1f}) "
         f"head_err={heading_error_deg:.1f} steer={steer_deg:.1f} "
-        f"mode={drive_mode} speed={speed}"
+        f"mode={drive_mode} speed={speed} "
+        f"loc={pose_source} marker={int(marker_visible)}"
     )
 
 
@@ -211,12 +255,15 @@ def drive_path(
     path: Path,
     *,
     shared_map: SharedMap,
+    localization: LocalizationManager,
     follower: PathFollower,
     motor: MotorController,
     loop_cfg: LoopConfig,
     car_id: int = 0,
     timeout_s: float = 180.0,
     debug_show_grid: bool = False,
+    marker_frame_provider: Optional[Callable[[], Optional[np.ndarray]]] = None,
+    camera_pan_provider: Optional[Callable[[], Optional[float]]] = None,
 ) -> bool:
     if path is None or len(path.waypoints) < 2:
         raise ValueError("drive_path requires a Path with at least two waypoints")
@@ -243,14 +290,15 @@ def drive_path(
                     car_id=car_id,
                 )
 
-            pose_grid = shared_map.get_pose(car_id, frame="grid")
+            _tick_marker_localization(
+                localization=localization,
+                marker_frame_provider=marker_frame_provider,
+                camera_pan_provider=camera_pan_provider,
+            )
+
+            pose_grid = localization.get_pose(frame="grid")
             if pose_grid is None:
-                pose_grid = integrate_dead_reckoning(
-                    shared_map=shared_map,
-                    car_id=car_id,
-                    forward_step=0.0,
-                    yaw_delta=0.0,
-                )
+                pose_grid = Pose(0.0, 0.0, 0.0)
 
             active_wp = path.waypoints[current_wp_idx]
             goal_xy_grid = (int(round(active_wp.x)), int(round(active_wp.y)))
@@ -348,9 +396,7 @@ def drive_path(
                         odom_steer_deg,
                     )
                 odom_yaw_deg = math.degrees(yaw_delta)
-                integrate_dead_reckoning(
-                    shared_map=shared_map,
-                    car_id=car_id,
+                localization.predict_dead_reckoning(
                     forward_step=odom_step_cells,
                     yaw_delta=yaw_delta,
                 )
@@ -366,6 +412,7 @@ def drive_path(
                 odom_yaw_deg=odom_yaw_deg,
                 odom_steer_deg=odom_steer_deg,
             )
+            loc_status = localization.get_status()
 
             _log_drive_status(
                 pose_grid=pose_grid,
@@ -382,6 +429,8 @@ def drive_path(
                 steer_deg=command.odom_steer_deg,
                 drive_mode=command.drive_mode,
                 speed=command.speed,
+                pose_source=loc_status.pose_source,
+                marker_visible=loc_status.marker_visible,
             )
 
             if debug_show_grid:
@@ -393,7 +442,8 @@ def drive_path(
                     ),
                     (
                         f"ultra={'None' if latest_ultra_cm is None else f'{latest_ultra_cm:.1f}cm'} "
-                        f"path_n={len(path.waypoints)} speed={command.speed}"
+                        f"path_n={len(path.waypoints)} speed={command.speed} "
+                        f"loc={loc_status.pose_source} marker={int(loc_status.marker_visible)}"
                     ),
                 ]
                 if live_pose is not None:
