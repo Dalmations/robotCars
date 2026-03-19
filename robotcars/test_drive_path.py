@@ -24,6 +24,7 @@ class LoopConfig:
     cm_per_grid: float = 50.0
     action_tick_s: float = 0.10
     ultra_stop_cm: float = 20.0
+    startup_marker_lock_timeout_s: float = 3.0
     pivot_turn_heading_deg: float = 45.0
     pivot_turn_exit_deg: float = 20.0
     pivot_turn_steer_deg: float = 30.0
@@ -218,6 +219,32 @@ def _tick_marker_localization(
     )
 
 
+def _initialize_marker_localization(
+    *,
+    localization: LocalizationManager,
+    marker_frame_provider: Optional[Callable[[], Optional[np.ndarray]]],
+    camera_pan_provider: Optional[Callable[[], Optional[float]]],
+    timeout_s: float,
+    retry_sleep_s: float,
+) -> bool:
+    if marker_frame_provider is None:
+        return False
+
+    t0 = time.time()
+    while (time.time() - t0) < max(0.0, float(timeout_s)):
+        frame = _read_marker_frame(marker_frame_provider)
+        if frame is not None:
+            pose = localization.initialize_from_marker_frame(
+                frame,
+                camera_pan_deg=_read_camera_pan_deg(camera_pan_provider),
+            )
+            if pose is not None:
+                return True
+        time.sleep(max(0.01, float(retry_sleep_s)))
+
+    return False
+
+
 def _log_drive_status(
     *,
     pose_grid: Pose,
@@ -236,8 +263,12 @@ def _log_drive_status(
     speed: int,
     pose_source: str,
     marker_visible: bool,
+    correction_distance: float,
+    correction_heading_deg: float,
+    seconds_since_marker_fix: float,
 ) -> None:
     ultra_str = "None" if dist_cm is None else f"{round(dist_cm, 1)}cm"
+    fix_age_str = "never" if seconds_since_marker_fix < 0.0 else f"{seconds_since_marker_fix:.1f}s"
     print(
         f"pose_g=({pose_grid.x:.1f},{pose_grid.y:.1f},{pose_grid.theta:.2f}) "
         f"wp={waypoint_idx}/{waypoint_total} "
@@ -247,7 +278,9 @@ def _log_drive_status(
         f"target=({target_xy[0]:.1f},{target_xy[1]:.1f}) "
         f"head_err={heading_error_deg:.1f} steer={steer_deg:.1f} "
         f"mode={drive_mode} speed={speed} "
-        f"loc={pose_source} marker={int(marker_visible)}"
+        f"loc={pose_source} marker={int(marker_visible)} "
+        f"corr=({correction_distance:.2f},{correction_heading_deg:.1f}) "
+        f"fix_age={fix_age_str}"
     )
 
 
@@ -277,6 +310,18 @@ def drive_path(
     current_wp_idx = 1
     pivot_active = False
     follower.reset()
+    loc_status = localization.get_status()
+    marker_locked = loc_status.seconds_since_marker_fix >= 0.0
+    if not marker_locked:
+        marker_locked = _initialize_marker_localization(
+            localization=localization,
+            marker_frame_provider=marker_frame_provider,
+            camera_pan_provider=camera_pan_provider,
+            timeout_s=float(loop_cfg.startup_marker_lock_timeout_s),
+            retry_sleep_s=float(loop_cfg.action_tick_s),
+        )
+        if marker_frame_provider is not None:
+            print(f"Startup marker lock: {marker_locked}")
 
     try:
         while (time.time() - t0) < timeout_s:
@@ -431,6 +476,9 @@ def drive_path(
                 speed=command.speed,
                 pose_source=loc_status.pose_source,
                 marker_visible=loc_status.marker_visible,
+                correction_distance=loc_status.correction_distance,
+                correction_heading_deg=loc_status.correction_heading_deg,
+                seconds_since_marker_fix=loc_status.seconds_since_marker_fix,
             )
 
             if debug_show_grid:
@@ -443,9 +491,14 @@ def drive_path(
                     (
                         f"ultra={'None' if latest_ultra_cm is None else f'{latest_ultra_cm:.1f}cm'} "
                         f"path_n={len(path.waypoints)} speed={command.speed} "
-                        f"loc={loc_status.pose_source} marker={int(loc_status.marker_visible)}"
+                        f"loc={loc_status.pose_source} marker={int(loc_status.marker_visible)} "
+                        f"corr=({loc_status.correction_distance:.2f},{loc_status.correction_heading_deg:.1f})"
                     ),
                 ]
+                fix_age_str = "never" if loc_status.seconds_since_marker_fix < 0.0 else f"{loc_status.seconds_since_marker_fix:.1f}s"
+                live_info.append(
+                    f"fix_age={fix_age_str} snap_count={loc_status.marker_snap_count}"
+                )
                 if live_pose is not None:
                     live_info.append(
                         f"pose=({live_pose.x:.2f},{live_pose.y:.2f},{live_pose.theta:.2f})"
