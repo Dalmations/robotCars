@@ -211,38 +211,10 @@ def _tick_marker_localization(
     camera_pan_provider: Optional[Callable[[], Optional[float]]],
 ) -> None:
     frame = _read_marker_frame(marker_frame_provider)
-    if frame is None:
-        return
     localization.correct_from_marker_frame(
         frame,
         camera_pan_deg=_read_camera_pan_deg(camera_pan_provider),
     )
-
-
-def _initialize_marker_localization(
-    *,
-    localization: LocalizationManager,
-    marker_frame_provider: Optional[Callable[[], Optional[np.ndarray]]],
-    camera_pan_provider: Optional[Callable[[], Optional[float]]],
-    timeout_s: float,
-    retry_sleep_s: float,
-) -> bool:
-    if marker_frame_provider is None:
-        return False
-
-    t0 = time.time()
-    while (time.time() - t0) < max(0.0, float(timeout_s)):
-        frame = _read_marker_frame(marker_frame_provider)
-        if frame is not None:
-            pose = localization.initialize_from_marker_frame(
-                frame,
-                camera_pan_deg=_read_camera_pan_deg(camera_pan_provider),
-            )
-            if pose is not None:
-                return True
-        time.sleep(max(0.01, float(retry_sleep_s)))
-
-    return False
 
 
 def _log_drive_status(
@@ -262,6 +234,7 @@ def _log_drive_status(
     drive_mode: str,
     speed: int,
     pose_source: str,
+    marker_update_source: str,
     marker_visible: bool,
     correction_distance: float,
     correction_heading_deg: float,
@@ -278,7 +251,7 @@ def _log_drive_status(
         f"target=({target_xy[0]:.1f},{target_xy[1]:.1f}) "
         f"head_err={heading_error_deg:.1f} steer={steer_deg:.1f} "
         f"mode={drive_mode} speed={speed} "
-        f"loc={pose_source} marker={int(marker_visible)} "
+        f"loc={pose_source} marker_src={marker_update_source} marker={int(marker_visible)} "
         f"corr=({correction_distance:.2f},{correction_heading_deg:.1f}) "
         f"fix_age={fix_age_str}"
     )
@@ -310,18 +283,6 @@ def drive_path(
     current_wp_idx = 1
     pivot_active = False
     follower.reset()
-    loc_status = localization.get_status()
-    marker_locked = loc_status.seconds_since_marker_fix >= 0.0
-    if not marker_locked:
-        marker_locked = _initialize_marker_localization(
-            localization=localization,
-            marker_frame_provider=marker_frame_provider,
-            camera_pan_provider=camera_pan_provider,
-            timeout_s=float(loop_cfg.startup_marker_lock_timeout_s),
-            retry_sleep_s=float(loop_cfg.action_tick_s),
-        )
-        if marker_frame_provider is not None:
-            print(f"Startup marker lock: {marker_locked}")
 
     try:
         while (time.time() - t0) < timeout_s:
@@ -475,6 +436,7 @@ def drive_path(
                 drive_mode=command.drive_mode,
                 speed=command.speed,
                 pose_source=loc_status.pose_source,
+                marker_update_source=loc_status.marker_update_source,
                 marker_visible=loc_status.marker_visible,
                 correction_distance=loc_status.correction_distance,
                 correction_heading_deg=loc_status.correction_heading_deg,
@@ -491,7 +453,8 @@ def drive_path(
                     (
                         f"ultra={'None' if latest_ultra_cm is None else f'{latest_ultra_cm:.1f}cm'} "
                         f"path_n={len(path.waypoints)} speed={command.speed} "
-                        f"loc={loc_status.pose_source} marker={int(loc_status.marker_visible)} "
+                        f"loc={loc_status.pose_source} marker_src={loc_status.marker_update_source} "
+                        f"marker={int(loc_status.marker_visible)} "
                         f"corr=({loc_status.correction_distance:.2f},{loc_status.correction_heading_deg:.1f})"
                     ),
                 ]

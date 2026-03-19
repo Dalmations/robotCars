@@ -161,9 +161,6 @@ class MonocularVSLAM:
 
     # ---------------- Public diagnostics ----------------
 
-    def get_debug_frame(self) -> Optional[np.ndarray]:
-        return None if self._dbg_frame_bgr is None else self._dbg_frame_bgr.copy()
-
     def get_status(self) -> VslamStatus:
         s = self._status
         return VslamStatus(

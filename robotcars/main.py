@@ -2,8 +2,6 @@
 # Builds the shared map, motor, follower, and a fixed shape path, then follows it once.
 from __future__ import annotations
 
-import time
-
 import cv2
 
 from car_tools.camera_input import CameraStreamConfig, OpenCVCameraStream
@@ -80,28 +78,6 @@ def build_camera_stream() -> OpenCVCameraStream:
     ))
 
 
-def initialize_pose_from_marker(
-    *,
-    localization: LocalizationManager,
-    camera_stream: OpenCVCameraStream,
-    timeout_s: float = 3.0,
-) -> bool:
-    t0 = time.time()
-    while (time.time() - t0) < float(timeout_s):
-        frame = camera_stream.get_frame()
-        if frame is None:
-            time.sleep(0.05)
-            continue
-        pose = localization.initialize_from_marker_frame(
-            frame,
-            camera_pan_deg=0.0,
-        )
-        if pose is not None:
-            return True
-        time.sleep(0.05)
-    return False
-
-
 def build_motor() -> MotorController:
     return MotorController(MotorConfig(
         speed=26,                                 # default drive speed
@@ -149,15 +125,20 @@ def main() -> None:
     motor = build_motor()
     follower = build_follower(motor)
     loop_cfg = build_loop_config()
-    marker_locked = initialize_pose_from_marker(
-        localization=localization,
-        camera_stream=camera_stream,
-        timeout_s=float(loop_cfg.startup_marker_lock_timeout_s),
-    )
-    print(f"Startup marker lock: {marker_locked}")
-    path = build_path(shared_map)
 
     try:
+        marker_locked = localization.initialize_from_marker_provider(
+            frame_provider=camera_stream.get_frame,
+            camera_pan_provider=lambda: 0.0,
+            timeout_s=float(loop_cfg.startup_marker_lock_timeout_s),
+            retry_sleep_s=float(loop_cfg.action_tick_s),
+        )
+        print(f"Startup marker lock: {marker_locked}")
+        if not marker_locked:
+            print("Aborting drive: origin marker not acquired.")
+            return
+
+        path = build_path(shared_map)
         route = [(int(round(wp.x)), int(round(wp.y))) for wp in path.waypoints]
         print("Drive route:", route)
         ok = drive_path(
@@ -173,7 +154,6 @@ def main() -> None:
             camera_pan_provider=lambda: 0.0,
         )
         print(f"Completed path to {route[-1]}:", ok)
-        time.sleep(0.5)
     finally:
         motor.stop()
         camera_stream.release()

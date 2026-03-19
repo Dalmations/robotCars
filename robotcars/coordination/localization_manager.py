@@ -3,11 +3,12 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Callable, Literal, Optional
 
 import numpy as np
 
-from car_tools.obstacle_detection import MonocularVSLAM, VslamStatus
+from car_tools.obstacle_detection import MonocularVSLAM
+from car_tools.picarx_path_follower import predict_dead_reckoning_pose
 from coordination.shared_map import FrameName, SharedMap
 from model import Pose
 
@@ -25,6 +26,7 @@ class LocalizationConfig:
 @dataclass
 class LocalizationStatus:
     pose_source: Literal["init", "dr", "marker", "fused"] = "init"
+    marker_update_source: Literal["none", "pending", "marker", "fused"] = "none"
     marker_visible: bool = False
     marker_pose_valid: bool = False
     marker_confidence: float = 0.0
@@ -41,24 +43,6 @@ def wrap_angle(a: float) -> float:
     while a < -math.pi:
         a += 2.0 * math.pi
     return a
-
-
-def predict_dead_reckoning_pose(
-    pose_world: Pose,
-    *,
-    forward_step: float,
-    yaw_delta: float,
-) -> Pose:
-    step = float(forward_step)
-    dtheta = float(yaw_delta)
-    theta_mid = float(pose_world.theta) + 0.5 * dtheta
-
-    return Pose(
-        x=float(pose_world.x + step * math.cos(theta_mid)),
-        y=float(pose_world.y + step * math.sin(theta_mid)),
-        theta=float(wrap_angle(float(pose_world.theta) + dtheta)),
-    )
-
 
 class LocalizationManager:
     """Owns shared pose publication."""
@@ -91,6 +75,7 @@ class LocalizationManager:
         s = self._status
         return LocalizationStatus(
             pose_source=str(s.pose_source),
+            marker_update_source=str(s.marker_update_source),
             marker_visible=bool(s.marker_visible),
             marker_pose_valid=bool(s.marker_pose_valid),
             marker_confidence=float(s.marker_confidence),
@@ -100,11 +85,6 @@ class LocalizationManager:
             correction_heading_deg=float(s.correction_heading_deg),
             seconds_since_marker_fix=float(s.seconds_since_marker_fix),
         )
-
-    def get_marker_status(self) -> Optional[VslamStatus]:
-        if self.marker_localizer is None:
-            return None
-        return self.marker_localizer.get_status()
 
     def predict_dead_reckoning(self, *, forward_step: float, yaw_delta: float) -> Pose:
         pose_world = self.get_pose(frame="world")
@@ -126,6 +106,7 @@ class LocalizationManager:
         *,
         camera_pan_deg: Optional[float] = None,
     ) -> Optional[Pose]:
+        self._reset_marker_update_status()
         marker_pose = self._marker_pose_from_frame(
             frame_rgb_or_bgr,
             camera_pan_deg=camera_pan_deg,
@@ -133,14 +114,40 @@ class LocalizationManager:
         if marker_pose is None:
             return None
         if not self._accept_pending_marker_pose(marker_pose):
+            self._status.marker_update_source = "pending"
             return None
 
         self._status.correction_distance = 0.0
         self._status.correction_heading_deg = 0.0
+        self._status.marker_update_source = "marker"
         self._mark_marker_fix()
         self._publish_pose(marker_pose, source="marker")
         self._clear_pending_marker_pose()
         return marker_pose
+
+    def initialize_from_marker_provider(
+        self,
+        *,
+        frame_provider: Callable[[], Optional[np.ndarray]],
+        camera_pan_provider: Optional[Callable[[], Optional[float]]] = None,
+        timeout_s: float = 3.0,
+        retry_sleep_s: float = 0.05,
+    ) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        sleep_s = max(0.01, float(retry_sleep_s))
+
+        while time.monotonic() < deadline:
+            frame = self._read_marker_frame(frame_provider)
+            if frame is not None:
+                pose = self.initialize_from_marker_frame(
+                    frame,
+                    camera_pan_deg=self._read_camera_pan_deg(camera_pan_provider),
+                )
+                if pose is not None:
+                    return True
+            time.sleep(sleep_s)
+
+        return False
 
     def correct_from_marker_frame(
         self,
@@ -148,6 +155,7 @@ class LocalizationManager:
         *,
         camera_pan_deg: Optional[float] = None,
     ) -> Optional[Pose]:
+        self._reset_marker_update_status()
         marker_pose = self._marker_pose_from_frame(
             frame_rgb_or_bgr,
             camera_pan_deg=camera_pan_deg,
@@ -160,6 +168,7 @@ class LocalizationManager:
         if current_pose is None:
             self._status.correction_distance = 0.0
             self._status.correction_heading_deg = 0.0
+            self._status.marker_update_source = "marker"
             self._mark_marker_fix()
             self._publish_pose(marker_pose, source="marker")
             self._clear_pending_marker_pose()
@@ -167,6 +176,7 @@ class LocalizationManager:
 
         fused_pose, source = self._fuse_marker_pose(current_pose, marker_pose)
         if fused_pose is None:
+            self._status.marker_update_source = source
             self._refresh_fix_age()
             return current_pose
         self._status.correction_distance = math.hypot(
@@ -176,31 +186,12 @@ class LocalizationManager:
         self._status.correction_heading_deg = abs(
             math.degrees(wrap_angle(float(fused_pose.theta) - float(current_pose.theta)))
         )
+        self._status.marker_update_source = source
         self._mark_marker_fix()
         self._publish_pose(fused_pose, source=source)
         if source == "marker":
             self._clear_pending_marker_pose()
         return fused_pose
-
-    def step(
-        self,
-        *,
-        forward_step: float,
-        yaw_delta: float,
-        frame_rgb_or_bgr: Optional[np.ndarray] = None,
-        camera_pan_deg: Optional[float] = None,
-    ) -> Pose:
-        pose = self.predict_dead_reckoning(
-            forward_step=forward_step,
-            yaw_delta=yaw_delta,
-        )
-        if frame_rgb_or_bgr is None:
-            return pose
-        corrected = self.correct_from_marker_frame(
-            frame_rgb_or_bgr,
-            camera_pan_deg=camera_pan_deg,
-        )
-        return pose if corrected is None else corrected
 
     def _publish_pose(
         self,
@@ -218,7 +209,12 @@ class LocalizationManager:
         *,
         camera_pan_deg: Optional[float] = None,
     ) -> Optional[Pose]:
-        if self.marker_localizer is None or frame_rgb_or_bgr is None:
+        if self.marker_localizer is None:
+            self._clear_marker_observation_status(gate_reason="marker_unavailable")
+            return None
+
+        if frame_rgb_or_bgr is None:
+            self._clear_marker_observation_status(gate_reason="no_marker_frame")
             return None
 
         marker_pose = self.marker_localizer.tick(
@@ -234,11 +230,34 @@ class LocalizationManager:
             return None
         return marker_pose
 
+    @staticmethod
+    def _read_marker_frame(
+        frame_provider: Callable[[], Optional[np.ndarray]],
+    ) -> Optional[np.ndarray]:
+        try:
+            return frame_provider()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _read_camera_pan_deg(
+        camera_pan_provider: Optional[Callable[[], Optional[float]]],
+    ) -> float:
+        if camera_pan_provider is None:
+            return 0.0
+        try:
+            pan_deg = camera_pan_provider()
+        except Exception:
+            return 0.0
+        if pan_deg is None or not math.isfinite(float(pan_deg)):
+            return 0.0
+        return float(pan_deg)
+
     def _fuse_marker_pose(
         self,
         predicted_pose: Pose,
         marker_pose: Pose,
-    ) -> tuple[Optional[Pose], Literal["marker", "fused"]]:
+    ) -> tuple[Optional[Pose], Literal["pending", "marker", "fused"]]:
         dx = float(marker_pose.x) - float(predicted_pose.x)
         dy = float(marker_pose.y) - float(predicted_pose.y)
         dist = math.hypot(dx, dy)
@@ -252,7 +271,7 @@ class LocalizationManager:
             return self._blend_pose(predicted_pose, marker_pose), "fused"
 
         if not self._accept_pending_marker_pose(marker_pose):
-            return None, "marker"
+            return None, "pending"
 
         return marker_pose, "marker"
 
@@ -287,6 +306,17 @@ class LocalizationManager:
         self._pending_marker_pose = None
         self._pending_marker_count = 0
         self._status.marker_snap_count = 0
+
+    def _reset_marker_update_status(self) -> None:
+        self._status.marker_update_source = "none"
+        self._status.correction_distance = 0.0
+        self._status.correction_heading_deg = 0.0
+
+    def _clear_marker_observation_status(self, *, gate_reason: str) -> None:
+        self._status.marker_visible = False
+        self._status.marker_pose_valid = False
+        self._status.marker_confidence = 0.0
+        self._status.marker_gate_reason = gate_reason
 
     def _mark_marker_fix(self) -> None:
         self._last_marker_fix_t = time.monotonic()
