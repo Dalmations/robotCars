@@ -1,4 +1,5 @@
 import queue
+import os
 
 from car_tools.movement import MovementPlanner
 from car_tools.motor_controller import MotorController, MotorConfig
@@ -20,29 +21,43 @@ class FollowerClient(MQTTClient):
         print(f'{self.id} received: {topic} - {msg}')
         self.message_q.put(msg)
 
+IDENTITY = os.uname().nodename
+PARAMS = {
+    'strawberry': {
+        'circle': {
+            'wheelbase':2.0
+        }
+    },
+    'blueberry': {
+        'circle': {
+            'wheelbase':2.5
+        }
+    }
+}
 
 def follower_main():
-    fc = FollowerClient('Robot1', "10.183.37.93")
+    fc = FollowerClient(IDENTITY, "10.229.180.83")
     fc.start() 
     planner = MovementPlanner()
     motor = MotorController(MotorConfig(speed=80))
-    follower = PurePursuitFollower(motor, FollowerConfig())
+    follower = PurePursuitFollower(motor, FollowerConfig(), PARAMS[IDENTITY])
     while True:
         try:
             msg = fc.message_q.get()
             shape = msg['message']
             path = planner.plan_formation(shape)
+            follower.update_params(shape)
             follower.follow(path)
             motor.stop()
         finally:
             motor.stop()
 
 def leader_main():
-    fc = FollowerClient('Leader', 'localhost')
+    fc = FollowerClient(IDENTITY, 'localhost')
     fc.start() 
     planner = MovementPlanner()
     motor = MotorController(MotorConfig(speed=80))
-    follower = PurePursuitFollower(motor, FollowerConfig())
+    follower = PurePursuitFollower(motor, FollowerConfig(), PARAMS[IDENTITY])
     vosk = Vosk(language="en-us")
     while True:
         try:
@@ -55,9 +70,13 @@ def leader_main():
             fc.publish_broadcast({'message':shape})
             fc.message_q.get()
             path = planner.plan_formation(shape)
+            follower.update_params(shape)
             follower.follow(path)
             motor.stop()
         finally:
             motor.stop()
 
-leader_main()
+if IDENTITY=='strawberry':
+    leader_main()
+else:
+    follower_main()

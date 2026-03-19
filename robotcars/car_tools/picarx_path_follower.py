@@ -57,9 +57,10 @@ class PurePursuitFollower:
     For real accuracy, later we will replace pose updates with camera/odometry.
     """
 
-    def __init__(self, motor: MotorController, cfg: Optional[FollowerConfig] = None):
+    def __init__(self, motor: MotorController, cfg: Optional[FollowerConfig] = None, params:dict):
         self.motor = motor
         self.cfg = cfg or FollowerConfig()
+        self.params = params
         
 
     # def follow(self, path: Path, start_pose: Optional[Pose2D] = None) -> None:
@@ -129,12 +130,18 @@ class PurePursuitFollower:
             Returns a multiplier between 0.0 and 1.0 based on ultrasonic data.
             """
             distance = self.motor.px.get_distance()
+            if distance < 0:
+                 distance = 100
+            #print(distance)
             if distance > self.cfg.safe_dist:
                 return 1.0
             if distance <= self.cfg.stop_dist:
                 return 0.0
             # Linear interpolation: (dist - stop) / (safe - stop)
             return (distance - self.cfg.stop_dist) / (self.cfg.safe_dist - self.cfg.stop_dist)
+    
+    def update_params(self, shape):
+        self.cfg.wheelbase = self.params[shape]['wheelbase']
 
     # -------------------------
     # Pure Pursuit math

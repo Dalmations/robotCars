@@ -51,9 +51,9 @@ class MovementPlanner:
     def plan_formation(self, shape : str) -> Path:
         match shape:
             case 'circle':
-                with open('path_points.txt','w') as f:
-                    for pair in self.generate_circle_points():
-                        f.write(f'{pair}\n')
+                # with open('path_points.txt','w') as f:
+                #     for pair in self.generate_circle_points():
+                #         f.write(f'{pair}\n')
                 return Path([TargetPoint(x, y) for (x, y) in self.generate_circle_points()])
             case _:
                 return Path([])
