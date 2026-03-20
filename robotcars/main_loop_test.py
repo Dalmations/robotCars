@@ -1,7 +1,7 @@
 import queue
 import os
 
-from car_tools.movement import MovementPlanner
+from car_tools.movement import plan_formation
 from car_tools.motor_controller import MotorController, MotorConfig
 from car_tools.picarx_path_follower import PurePursuitFollower, FollowerConfig
 # from speech_input.test_phrase_to_bucket import classify
@@ -38,14 +38,13 @@ PARAMS = {
 def follower_main():
     fc = FollowerClient(IDENTITY, "10.229.180.83")
     fc.start() 
-    planner = MovementPlanner()
     motor = MotorController(MotorConfig(speed=80))
     follower = PurePursuitFollower(motor, FollowerConfig(), PARAMS[IDENTITY])
     while True:
         try:
             msg = fc.message_q.get()
             shape = msg['message']
-            path = planner.plan_formation(shape)
+            path = plan_formation(shape)
             follower.update_params(shape)
             follower.follow(path)
             motor.stop()
@@ -54,8 +53,7 @@ def follower_main():
 
 def leader_main():
     fc = FollowerClient(IDENTITY, 'localhost')
-    fc.start() 
-    planner = MovementPlanner()
+    fc.start()
     motor = MotorController(MotorConfig(speed=80))
     follower = PurePursuitFollower(motor, FollowerConfig(), PARAMS[IDENTITY])
     vosk = Vosk(language="en-us")
@@ -69,7 +67,7 @@ def leader_main():
             shape = classify(phrase)
             fc.publish_broadcast({'message':shape})
             fc.message_q.get()
-            path = planner.plan_formation(shape)
+            path = plan_formation(shape)
             follower.update_params(shape)
             follower.follow(path)
             motor.stop()
