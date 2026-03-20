@@ -24,11 +24,6 @@ class SharedMap:
 
     _static_grid: Optional[np.ndarray] = None
 
-    def reset_for_scenario(self, scenario: Scenario) -> None:
-        self.obstacles.clear()
-        self.poses.clear()
-        self.map_points.clear()
-
     def merge_observations(self, car_id: int, obs: Observations, pose: Pose) -> None:
         self.poses[car_id] = pose
         for ob in obs.obstacles:

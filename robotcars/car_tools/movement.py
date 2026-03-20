@@ -38,16 +38,6 @@ class MovementPlanner:
         waypoints = [TargetPoint(x=float(x), y=float(y)) for (x, y) in raw_path]
         return Path(waypoints=waypoints)
 
-    def is_obstructed(self, path: Path, shared_map: SharedMap) -> bool:
-        # Conservatively: if any waypoint is on an obstacle cell, call it obstructed.
-        grid = shared_map.to_occupancy_grid(size=self.world_size)
-        for wp in path.waypoints:
-            x, y = int(round(wp.x)), int(round(wp.y))
-            if 0 <= x < grid.shape[0] and 0 <= y < grid.shape[1]:
-                if grid[x, y] == 1:
-                    return True
-        return False
-
     def plan_formation(self, shape : str) -> Path:
         match shape:
             case 'circle':
@@ -55,6 +45,7 @@ class MovementPlanner:
                 #     for pair in self.generate_circle_points():
                 #         f.write(f'{pair}\n')
                 return Path([TargetPoint(x, y) for (x, y) in self.generate_circle_points()])
+            # TODO: Add square & hexagon path
             case _:
                 return Path([])
 

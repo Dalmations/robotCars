@@ -1,36 +1,6 @@
 # model.py
 from typing import Dict, Any, List, Optional
 
-
-class SpeechResult:
-    def __init__(
-        self,
-        accepted: bool,
-        intent: str,
-        parameters: Dict[str, Any],
-        confidence: float,
-    ):
-        self.accepted = accepted
-        self.intent = intent
-        self.parameters = parameters
-        self.confidence = confidence
-
-    def __repr__(self) -> str:
-        return (
-            f"SpeechResult(accepted={self.accepted}, "
-            f"intent={self.intent!r}, confidence={self.confidence:.2f})"
-        )
-
-
-class Scenario:
-    def __init__(self, name: str, params: Dict[str, Any]):
-        self.name = name
-        self.params = params
-
-    def __repr__(self) -> str:
-        return f"Scenario(name={self.name!r}, params={self.params})"
-
-
 class Pose:
     def __init__(self, x: float, y: float, theta: float):
         self.x = float(x)
@@ -41,8 +11,6 @@ class Pose:
         return f"Pose(x={self.x:.2f}, y={self.y:.2f}, theta={self.theta:.2f})"
 
 
-PoseDict = Dict[int, Pose]
-
 
 class TargetPoint:
     def __init__(self, x: float, y: float):
@@ -51,9 +19,6 @@ class TargetPoint:
 
     def __repr__(self) -> str:
         return f"TargetPoint(x={self.x:.2f}, y={self.y:.2f})"
-
-
-TargetPointDict = Dict[int, TargetPoint]
 
 
 class Obstacle:
