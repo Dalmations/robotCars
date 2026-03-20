@@ -49,6 +49,7 @@ def follower_main():
     fc.start() 
     motor = MotorController(MotorConfig(speed=80))
     follower = PurePursuitFollower(motor, FollowerConfig(), PARAMS[IDENTITY])
+    
     pathFollower = build_follower(motor)
     shared_map = build_shared_map()
     loop_cfg = build_loop_config()
@@ -78,6 +79,10 @@ def leader_main():
     motor = MotorController(MotorConfig(speed=80))
     follower = PurePursuitFollower(motor, FollowerConfig(), PARAMS[IDENTITY])
     vosk = Vosk(language="en-us")
+
+    pathFollower = build_follower(motor)
+    shared_map = build_shared_map()
+    loop_cfg = build_loop_config()
     while True:
         try:
             print('Listening')
@@ -91,6 +96,15 @@ def leader_main():
             path = plan_formation(shape)
             follower.update_params(shape)
             follower.follow(path)
+            # TODO: Try drive_path() with circle and merge PurePursuitFollower and PathFollower in picarx_path_follower.py
+            # ok = drive_path(
+            #     path,
+            #     shared_map=shared_map,
+            #     follower=pathFollower,
+            #     motor=motor,
+            #     loop_cfg=loop_cfg,
+            #     timeout_s=180.0,
+            # )
             motor.stop()
         finally:
             motor.stop()
