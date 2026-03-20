@@ -1,31 +1,100 @@
-from car_tools.camera_input import PiCarXCamera, CameraConfig
-from car_tools.obstacle_detection import VslamObstacleDetector, CameraIntrinsics
+# Main entry point for the drive-path demo.
+# Builds the shared map, motor, follower, and a fixed shape path, then follows it once.
+from __future__ import annotations
+
+import time
+
+import cv2
+
+from car_tools.movement import build_equilateral_triangle_route, build_square_route, route_to_path
+from car_tools.motor_controller import MotorConfig, MotorController
+from car_tools.picarx_path_follower import PathFollowerConfig, PathFollower
 from coordination.shared_map import SharedMap
+from model import Path, Pose
+from test_drive_path import LoopConfig, drive_path
 
-shared_map = SharedMap()
 
-cam = PiCarXCamera(CameraConfig(display_web=True, obstacle_color="red"))
-cam.start()
+def build_shared_map() -> SharedMap:
+    shared_map = SharedMap()
+    shared_map.configure_grid(
+        size=(30, 30),
+        resolution=1.0,
+        origin_world=(-10.0, -10.0),
+    )
+    shared_map.set_pose(0, Pose(0.0, 0.0, 0.0))
+    return shared_map
 
-intr = CameraIntrinsics(
-    fx=628.0,
-    fy=642.0,
-    cx=cam.cfg.frame_size[0] / 2.0,  # 320 for 640x480
-    cy=cam.cfg.frame_size[1] / 2.0,  # 240 for 640x480
-)
 
-det = VslamObstacleDetector(intr=intr, shared_map=shared_map, car_id=0)
+def build_motor() -> MotorController:
+    return MotorController(MotorConfig(
+        speed=26,                                 # default drive speed
+        settle_seconds=0.01,                      # servo settle pause
+    ))
 
-# shared_map.poses[0] updates when pose is valid
-# shared_map.map_points grows
-# shared_map.obstacles fills
-try:
-    while True:
-        frame = cam.read()
-        if frame is None:
-            continue
-        pose = det.tick(frame)
-        if pose is not None:
-            print("pose:", pose.x, pose.y, pose.theta, "obstacles:", len(shared_map.obstacles), "pts:", len(shared_map.map_points))
-finally:
-    cam.stop()
+
+def build_follower(motor: MotorController) -> PathFollower:
+    return PathFollower(motor, PathFollowerConfig(
+        lookahead=5.0,                            # pure pursuit lookahead distance
+        wheelbase=1.0,                           # front to back wheel wheelbase
+        goal_tolerance=0.6,                       # goal reached radius
+        steer_sign=1.0,                           # follower steering sign
+        steer_alpha=0.25,                         # steering smoother
+        steer_deadband_deg=2.0,                   # ignore tiny steer changes
+        steer_rate_limit_deg_per_tick=12.0,       # max steer change
+        dock_distance_grid=8.0,                   # near goal threshold
+        dock_min_lookahead_grid=1.5,              # minimum dock lookahead
+    ))
+
+
+def build_loop_config() -> LoopConfig:
+    return LoopConfig(
+        cm_per_grid= 20,                           # centimeters per cell
+    )
+
+
+def build_route(shared_map: SharedMap) -> list[tuple[int, int]]:
+    start_grid = shared_map.get_car_grid_position(0)
+    # route = build_equilateral_triangle_route(start_grid, side_cells=6)
+    route = build_square_route(start_grid, side_cells=6)
+    return [
+        *route,
+    ]
+
+
+def build_path(shared_map: SharedMap) -> Path:
+    return route_to_path(build_route(shared_map))
+
+
+def main() -> None:
+    shared_map = build_shared_map()
+    motor = build_motor()
+    follower = build_follower(motor)
+    loop_cfg = build_loop_config()
+    path = build_path(shared_map)
+
+    try:
+        route = [(int(round(wp.x)), int(round(wp.y))) for wp in path.waypoints]
+        print("Drive route:", route)
+        ok = drive_path(
+            path,
+            shared_map=shared_map,
+            follower=follower,
+            motor=motor,
+            loop_cfg=loop_cfg,
+            timeout_s=180.0,
+        )
+        print(f"Completed path to {route[-1]}:", ok)
+        time.sleep(0.5)
+    finally:
+        motor.stop()
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

@@ -3,7 +3,16 @@ import os
 
 from car_tools.movement import plan_formation
 from car_tools.motor_controller import MotorController, MotorConfig
-from car_tools.picarx_path_follower import PurePursuitFollower, FollowerConfig
+from car_tools.picarx_path_follower import PurePursuitFollower, FollowerConfig, PathFollower, PathFollowerConfig
+
+from coordination.shared_map import SharedMap
+from main import (
+    build_shared_map,
+    build_follower,
+    build_loop_config,
+)
+
+from test_drive_path import LoopConfig, drive_path
 # from speech_input.test_phrase_to_bucket import classify
 from speech_input.classification_MVP import classify
 from picarx.stt import Vosk
@@ -40,6 +49,9 @@ def follower_main():
     fc.start() 
     motor = MotorController(MotorConfig(speed=80))
     follower = PurePursuitFollower(motor, FollowerConfig(), PARAMS[IDENTITY])
+    pathFollower = build_follower(motor)
+    shared_map = build_shared_map()
+    loop_cfg = build_loop_config()
     while True:
         try:
             msg = fc.message_q.get()
@@ -47,6 +59,15 @@ def follower_main():
             path = plan_formation(shape)
             follower.update_params(shape)
             follower.follow(path)
+            # TODO: Try drive_path() with circle and merge PurePursuitFollower and PathFollower in picarx_path_follower.py
+            # ok = drive_path(
+            #     path,
+            #     shared_map=shared_map,
+            #     follower=pathFollower,
+            #     motor=motor,
+            #     loop_cfg=loop_cfg,
+            #     timeout_s=180.0,
+            # )
             motor.stop()
         finally:
             motor.stop()

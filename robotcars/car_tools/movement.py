@@ -15,13 +15,11 @@ GridPoint = Tuple[int, int]
 def clamp(value: float, lo: float, hi: float) -> float:
     return max(float(lo), min(float(hi), float(value)))
 
-def plan_formation(shape : str) -> Path:
+def plan_formation(shared_map: SharedMap, shape : str) -> Path:
     match shape:
         case 'circle':
-            # with open('path_points.txt','w') as f:
-            #     for pair in generate_circle_points():
-            #         f.write(f'{pair}\n')
-            return Path([TargetPoint(x, y) for (x, y) in generate_circle_points()])
+            route = generate_circle_points()
+            return route_to_path(route)
         case 'square':
             start_grid = shared_map.get_car_grid_position(0)
             route = build_square_route(start_grid, side_cells=6)
@@ -77,7 +75,7 @@ def build_hexagon_route(start_xy_grid: GridPoint, *, side_cells: int = 6) -> lis
 
 def route_to_path(route_xy_grid: Iterable[GridPoint]) -> Path:
     waypoints = [
-        TargetPoint(x=float(int(point[0])), y=float(int(point[1])))
+        TargetPoint(x=float(point[0]), y=float(point[1]))
         for point in route_xy_grid
     ]
     return Path(waypoints=waypoints)
