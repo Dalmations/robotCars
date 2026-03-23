@@ -142,7 +142,8 @@ class PurePursuitFollower:
             return (distance - self.cfg.stop_dist) / (self.cfg.safe_dist - self.cfg.stop_dist)
     
     def update_params(self, shape):
-        self.cfg.wheelbase = self.params[shape]['wheelbase']
+        if shape in self.params:
+            self.cfg.wheelbase = self.params[shape]['wheelbase']
 
     # -------------------------
     # Pure Pursuit math
