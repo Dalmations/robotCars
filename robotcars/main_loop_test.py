@@ -13,7 +13,7 @@ from main import (
 )
 
 from test_drive_path import LoopConfig, drive_path
-from robotcars.speech_input.processor import handle_input
+from speech_input.processor import handle_input
 from picarx.stt import Vosk
 
 
@@ -63,16 +63,16 @@ def follower_main():
             shape = msg['message']
             path = plan_formation(shape)
             follower.update_params(shape)
-            follower.follow(path)
+            # follower.follow(path)
             # TODO: Try drive_path() with circle and merge PurePursuitFollower and PathFollower in picarx_path_follower.py
-            # ok = drive_path(
-            #     path,
-            #     shared_map=shared_map,
-            #     follower=pathFollower,
-            #     motor=motor,
-            #     loop_cfg=loop_cfg,
-            #     timeout_s=180.0,
-            # )
+            ok = drive_path(
+                path,
+                shared_map=shared_map,
+                follower=pathFollower,
+                motor=motor,
+                loop_cfg=loop_cfg,
+                timeout_s=180.0,
+            )
             motor.stop()
         finally:
             motor.stop()
@@ -103,16 +103,16 @@ def leader_main():
             fc.message_q.get()
             path = plan_formation(shape)
             follower.update_params(shape)
-            follower.follow(path)
+            # follower.follow(path)
             # TODO: Try drive_path() with circle and merge PurePursuitFollower and PathFollower in picarx_path_follower.py
-            # ok = drive_path(
-            #     path,
-            #     shared_map=shared_map,
-            #     follower=pathFollower,
-            #     motor=motor,
-            #     loop_cfg=loop_cfg,
-            #     timeout_s=180.0,
-            # )
+            ok = drive_path(
+                path,
+                shared_map=shared_map,
+                follower=pathFollower,
+                motor=motor,
+                loop_cfg=loop_cfg,
+                timeout_s=180.0,
+            )
             motor.stop()
         finally:
             motor.stop()

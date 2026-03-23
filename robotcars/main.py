@@ -6,7 +6,7 @@ import time
 
 import cv2
 
-from car_tools.movement import build_equilateral_triangle_route, build_square_route, route_to_path
+from car_tools.movement import build_square_route, route_to_path
 from car_tools.motor_controller import MotorConfig, MotorController
 from car_tools.picarx_path_follower import PathFollowerConfig, PathFollower
 from coordination.shared_map import SharedMap
