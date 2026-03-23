@@ -13,8 +13,7 @@ from main import (
 )
 
 from test_drive_path import LoopConfig, drive_path
-# from speech_input.test_phrase_to_bucket import classify
-from speech_input.classification_MVP import classify
+from robotcars.speech_input.processor import handle_input
 from picarx.stt import Vosk
 
 
@@ -38,6 +37,11 @@ PARAMS = {
         }
     },
     'blueberry': {
+        'circle': {
+            'wheelbase':2.5
+        }
+    },
+    'raspberry': {
         'circle': {
             'wheelbase':2.5
         }
@@ -90,8 +94,12 @@ def leader_main():
             print(phrase)
             if not phrase:
                continue
-            shape = classify(phrase)
-            fc.publish_broadcast({'message':shape})
+            shape, robots = handle_input(phrase)
+            if not robots:
+                fc.publish_broadcast({'message':shape})
+            else:
+                for robot in robots:
+                    fc.publish_to_robot(robot, {'message':shape})
             fc.message_q.get()
             path = plan_formation(shape)
             follower.update_params(shape)

@@ -58,7 +58,7 @@ class PurePursuitFollower:
     For real accuracy, later we will replace pose updates with camera/odometry.
     """
 
-    def __init__(self, motor: MotorController, cfg: Optional[FollowerConfig] = None, params: dict):
+    def __init__(self, motor: MotorController, cfg: Optional[FollowerConfig] = None, params: dict={}):
         self.motor = motor
         self.cfg = cfg or FollowerConfig()
         self.params = params
