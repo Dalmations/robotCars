@@ -170,7 +170,7 @@ def drive_path(
     timeout_s: float = 180.0,
 ) -> bool:
     if path is None or len(path.waypoints) < 2:
-        raise ValueError("drive_path requires a Path with at least two waypoints")
+        return
     best_progress = 0.0
 
     last_ultra_tick_t = 0.0

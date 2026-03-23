@@ -108,15 +108,14 @@ def leader_main():
             follower.update_params(shape)
             # follower.follow(path)
             # TODO: Try drive_path() with circle and merge PurePursuitFollower and PathFollower in picarx_path_follower.py
-            if path is not None:
-                ok = drive_path(
-                    path,
-                    shared_map=shared_map,
-                    follower=pathFollower,
-                    motor=motor,
-                    loop_cfg=loop_cfg,
-                    timeout_s=180.0,
-                )
+            ok = drive_path(
+                path,
+                shared_map=shared_map,
+                follower=pathFollower,
+                motor=motor,
+                loop_cfg=loop_cfg,
+                timeout_s=180.0,
+            )
             motor.stop()
         finally:
             motor.stop()
