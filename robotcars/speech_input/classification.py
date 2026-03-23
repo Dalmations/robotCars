@@ -4,7 +4,7 @@ import numpy as np
 import re
 from speech_input.shapes import SHAPES
 
-EMBEDDING_FILE = "robotcars/speech_input/shape_embeddings.pkl"
+EMBEDDING_FILE = "speech_input/shape_embeddings.pkl"
 THRESHOLD = 0.6
 
 def embed(texts):

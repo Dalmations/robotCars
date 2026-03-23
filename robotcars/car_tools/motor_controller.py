@@ -1,65 +1,73 @@
-# motor_controller.py
+# car_tools/motor_controller.py
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
 from typing import Optional
 
-from picarx import Picarx  # SunFounder PiCar-X library https://docs.sunfounder.com/projects/picar-x-v20/en/latest/python/install_all_modules.html
-
-from model import TargetPoint
+from picarx import Picarx  # SunFounder PiCar-X library
 
 
 @dataclass
 class MotorConfig:
-    # Steering
-    max_steer_deg: float = 35.0    # PiCar-X examples use ~35 deg
-    steer_gain: float = 1.0        # multiply desired steering angle
-
     # Motion
-    speed: int = 80                # 0..100-ish (library uses percent-like speed)
-    step_seconds: float = 0.2     # time to move ~1 grid cell (tune for your car & cell size)
+    speed: int = 50                    # default drive speed
 
-    # Safety
-    settle_seconds: float = 0.02   # brief pause after steering changes
+    # Safety / timing
+    settle_seconds: float = 0.02       # servo settle pause
 
 
 class MotorController:
     """
     Hardware motor driver for PiCar-X.
 
-    - set_steering(angle_deg): sets steering servo
-    - step_forward(): drive forward for a fixed duration
+    - set_steering(angle_deg): sends the steering command to the servo
+    - forward_for(seconds): drives forward for duration, optionally stops
     - stop(): stop motors
     """
+
     def __init__(self, cfg: Optional[MotorConfig] = None):
         self.cfg = cfg or MotorConfig()
         self.px = Picarx()
         self._reached_target = False
+        self._applied_steer_deg: float = 0.0
+
+        # Make sure we start stopped
+        self.stop()
+
+    def reset_reached(self) -> None:
+        self._reached_target = False
 
     def set_steering(self, angle_deg: float) -> None:
-        # Clamp and apply gain
-        a = float(angle_deg) * self.cfg.steer_gain
-        a = max(-self.cfg.max_steer_deg, min(self.cfg.max_steer_deg, a))
-        self.px.set_dir_servo_angle(a)
-        time.sleep(self.cfg.settle_seconds)
+        """
+        angle_deg is the desired steering angle in degrees from controller.
+        This function sends the steering command to the servo.
+        """
+        cmd = float(angle_deg)
+        self.px.set_dir_servo_angle(cmd)
+        self._applied_steer_deg = cmd
+        if self.cfg.settle_seconds > 0:  # Brief servo settle pause
+            time.sleep(self.cfg.settle_seconds)
 
     def set_speed(self, speed: int) -> None:
-        """
-        Sets a speed command. PiCar-X uses a percent-like speed value.
-        """
-        self.cfg.speed = int(speed)
+        self.cfg.speed = int(max(0, min(100, speed)))
 
-    def forward_for(self, seconds: float) -> None:
-        """
-        Drive forward for a duration, then stop.
-        """
+    def forward_for(self, seconds: float, *, speed: Optional[int] = None) -> None:
         if seconds <= 0:
             return
-        self.px.forward(self.cfg.speed)
-        time.sleep(seconds)
-        self.px.forward(0) #  stop between steps for predictability
-    
+        spd = self.cfg.speed if speed is None else int(max(0, min(100, speed)))  # Use configured drive speed
+
+        self.px.forward(spd)
+        time.sleep(float(seconds))
+
+    def backward_for(self, seconds: float, *, speed: Optional[int] = None) -> None:
+        if seconds <= 0:
+            return
+        spd = self.cfg.speed if speed is None else int(max(0, min(100, speed)))  # Use configured drive speed
+        self.px.backward(spd)
+
+        time.sleep(float(seconds))
+
     def stop(self) -> None:
         self.px.stop()
 
@@ -69,4 +77,5 @@ class MotorController:
     def at_target(self) -> bool:
         return self._reached_target
 
-    
+    def get_applied_steering_deg(self) -> float:
+        return float(self._applied_steer_deg)

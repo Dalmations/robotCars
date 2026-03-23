@@ -61,8 +61,8 @@ def follower_main():
         try:
             msg = fc.message_q.get()
             shape = msg['message']
-            path = plan_formation(shape)
-            follower.update_params(shape)
+            path = plan_formation(shared_map, shape)
+            # follower.update_params(shape)
             # follower.follow(path)
             # TODO: Try drive_path() with circle and merge PurePursuitFollower and PathFollower in picarx_path_follower.py
             ok = drive_path(
@@ -101,18 +101,19 @@ def leader_main():
                 for robot in robots:
                     fc.publish_to_robot(robot, {'message':shape})
             fc.message_q.get()
-            path = plan_formation(shape)
-            follower.update_params(shape)
+            path = plan_formation(shared_map, shape)
+            # follower.update_params(shape)
             # follower.follow(path)
             # TODO: Try drive_path() with circle and merge PurePursuitFollower and PathFollower in picarx_path_follower.py
-            ok = drive_path(
-                path,
-                shared_map=shared_map,
-                follower=pathFollower,
-                motor=motor,
-                loop_cfg=loop_cfg,
-                timeout_s=180.0,
-            )
+            if path is not None:
+                ok = drive_path(
+                    path,
+                    shared_map=shared_map,
+                    follower=pathFollower,
+                    motor=motor,
+                    loop_cfg=loop_cfg,
+                    timeout_s=180.0,
+                )
             motor.stop()
         finally:
             motor.stop()

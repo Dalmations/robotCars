@@ -18,7 +18,7 @@ def clamp(value: float, lo: float, hi: float) -> float:
 def plan_formation(shared_map: SharedMap, shape : str) -> Path:
     match shape:
         case 'circle':
-            route = generate_circle_points()
+            route = generate_circle_points(shared_map.grid.size, num_points=20)
             return route_to_path(route)
         case 'square':
             start_grid = shared_map.get_car_grid_position(0)
