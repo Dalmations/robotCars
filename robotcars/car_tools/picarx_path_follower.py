@@ -226,7 +226,7 @@ def estimate_step_cells_for_duration(
 ) -> float:
     tick_count = float(duration_s) / float(max(1e-6, action_tick_s))
     ref_step = tick_count / 5.0
-    speed_ref = max(1.0, float(speed_ref))
+    speed_ref = max(1, speed_ref)
     speed_cmd = float(max(0, min(100, int(speed))))
     return ref_step * (speed_cmd / speed_ref)
 
@@ -271,6 +271,13 @@ class PathFollowerConfig:
 
     dock_distance_grid: float = 12.0           # near goal threshold
     dock_min_lookahead_grid: float = 6.0       # minimum dock lookahead
+
+    pivot_turn_heading_deg: float = 45.0
+    pivot_turn_exit_deg: float = 20.0
+    pivot_turn_steer_deg: float = 30.0
+    pivot_turn_settle_s: float = 0.12
+    pivot_turn_deg_per_s: float = 12.0
+    pivot_turn_cells_per_deg: float = 0.05
 
 
 class PathFollower:

@@ -33,17 +33,20 @@ IDENTITY = os.uname().nodename
 PARAMS = {
     'strawberry': {
         'circle': {
-            'wheelbase':2.0
+            'wheelbase':2.0,
+            'pivot_turn_heading_deg': 90.0
         }
     },
     'blueberry': {
         'circle': {
-            'wheelbase':2.5
+            'wheelbase':2.5,
+            'pivot_turn_heading_deg': 90.0
         }
     },
     'raspberry': {
         'circle': {
-            'wheelbase':2.5
+            'wheelbase':2.5,
+            'pivot_turn_heading_deg': 90.0
         }
     }
 }
