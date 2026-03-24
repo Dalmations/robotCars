@@ -1,5 +1,6 @@
 import queue
 import os
+import threading
 
 from car_tools.movement import plan_formation
 from car_tools.motor_controller import MotorController, MotorConfig
@@ -23,9 +24,12 @@ class FollowerClient(MQTTClient):
     def __init__(self, id, broker_ip, broker_port=1883):
         super().__init__(id, broker_ip, broker_port)
         self.message_q = queue.Queue()
+        self.busy = threading.Event()
 
     @override
     def handle_message(self, client, topic, msg):
+        if self.busy.is_set():
+            return
         print(f'{self.id} received: {topic} - {msg}')
         self.message_q.put(msg)
 
@@ -63,6 +67,7 @@ def follower_main():
     while True:
         try:
             msg = fc.message_q.get()
+            fc.busy.set()
             shape = msg['message']
             path = plan_formation(shared_map, shape)
             follower.update_params(shape)
@@ -79,6 +84,7 @@ def follower_main():
             motor.stop()
         finally:
             motor.stop()
+            fc.busy.clear()
 
 def leader_main():
     fc = FollowerClient(IDENTITY, 'localhost')
@@ -103,7 +109,10 @@ def leader_main():
             else:
                 for robot in robots:
                     fc.publish_to_robot(robot, {'message':shape})
-            fc.message_q.get()
+            try:
+                fc.message_q.get(timeout=3.0)
+            except Exception:
+                continue
             path = plan_formation(shared_map, shape)
             follower.update_params(shape)
             # follower.follow(path)
