@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 from model import Path, Pose
-from car_tools.motor_controller import MotorController
 from coordination.shared_map import SharedMap
+
+if TYPE_CHECKING:
+    from car_tools.motor_controller import MotorController
 
 
 def wrap_angle(a: float) -> float:
@@ -15,6 +17,22 @@ def wrap_angle(a: float) -> float:
     while a < -math.pi:
         a += 2.0 * math.pi
     return a
+
+
+def integrate_pose(
+    pose: Pose,
+    *,
+    forward_step: float,
+    yaw_delta: float,
+) -> Pose:
+    step = float(forward_step)
+    dtheta = float(yaw_delta)
+    theta_mid = float(pose.theta) + 0.5 * dtheta
+    return Pose(
+        x=float(pose.x + step * math.cos(theta_mid)),
+        y=float(pose.y + step * math.sin(theta_mid)),
+        theta=float(wrap_angle(float(pose.theta) + dtheta)),
+    )
 
 
 def estimate_step_cells_for_duration(
@@ -42,14 +60,10 @@ def integrate_dead_reckoning(
     if pose_world is None:
         pose_world = Pose(0.0, 0.0, 0.0)
 
-    step = float(forward_step)
-    dtheta = float(yaw_delta)
-    theta_mid = float(pose_world.theta) + 0.5 * dtheta
-
-    next_pose = Pose(
-        x=float(pose_world.x + step * math.cos(theta_mid)),
-        y=float(pose_world.y + step * math.sin(theta_mid)),
-        theta=float(wrap_angle(float(pose_world.theta) + dtheta)),
+    next_pose = integrate_pose(
+        pose_world,
+        forward_step=forward_step,
+        yaw_delta=yaw_delta,
     )
     shared_map.set_pose(car_id, next_pose)
     return next_pose
@@ -74,7 +88,7 @@ class FollowerConfig:
 
 
 class PathFollower:
-    def __init__(self, motor: MotorController, cfg: Optional[FollowerConfig] = None):
+    def __init__(self, motor: "MotorController", cfg: Optional[FollowerConfig] = None):
         self.motor = motor
         self.cfg = cfg or FollowerConfig()
         self._filtered_steer_deg = 0.0

@@ -2,13 +2,40 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional, Tuple, List, Literal
+from typing import Callable, Optional, Tuple, List, Literal
 
 import cv2
 import numpy as np
 
+from car_tools.picarx_path_follower import integrate_pose, wrap_angle
 from model import Pose
 from coordination.shared_map import SharedMap
+
+
+def _copy_pose(pose: Pose) -> Pose:
+    return Pose(x=float(pose.x), y=float(pose.y), theta=float(pose.theta))
+
+
+def _pose_distance(a: Pose, b: Pose) -> float:
+    return float(math.hypot(float(a.x) - float(b.x), float(a.y) - float(b.y)))
+
+
+def _heading_difference(a: float, b: float) -> float:
+    return abs(wrap_angle(float(a) - float(b)))
+
+
+def _blend_pose(base_pose: Pose, correction_pose: Pose, alpha: float) -> Pose:
+    blend = float(np.clip(float(alpha), 0.0, 1.0))
+    if blend <= 0.0:
+        return _copy_pose(base_pose)
+    if blend >= 1.0:
+        return _copy_pose(correction_pose)
+
+    return Pose(
+        x=float((1.0 - blend) * float(base_pose.x) + blend * float(correction_pose.x)),
+        y=float((1.0 - blend) * float(base_pose.y) + blend * float(correction_pose.y)),
+        theta=float(wrap_angle(float(base_pose.theta) + blend * wrap_angle(float(correction_pose.theta) - float(base_pose.theta)))),
+    )
 
 
 @dataclass
@@ -68,6 +95,7 @@ class VslamConfig:
     # Pose frame publishing
     forward_sign: float = 1.0
     pose_ema_alpha: float = 0.2
+    publish_pose_to_shared_map: bool = False
 
     # Confidence
     confidence_ema_alpha: float = 0.25
@@ -128,6 +156,33 @@ class VslamStatus:
     filtered_pose_x: float = 0.0
     filtered_pose_y: float = 0.0
     filtered_pose_theta: float = 0.0
+
+
+@dataclass
+class ConservativeCorrectionConfig:
+    min_cycles_between_corrections: int = 4
+    min_seconds_between_corrections: float = 0.4
+    min_translation_between_corrections: float = 0.75
+    min_heading_change_between_corrections_deg: float = 8.0
+
+    position_agreement_threshold: float = 0.75
+    heading_agreement_threshold_deg: float = 12.0
+
+    correction_alpha: float = 0.25
+    min_visual_confidence: float = 0.55
+
+
+@dataclass
+class ConservativeCorrectionResult:
+    attempted: bool
+    accepted: bool
+    reason: str
+    dead_reckoning_pose: Pose
+    obstacle_pose: Optional[Pose] = None
+    fused_pose: Optional[Pose] = None
+    position_error: float = 0.0
+    heading_error_deg: float = 0.0
+    visual_confidence: float = 0.0
 
 
 @dataclass
@@ -264,6 +319,35 @@ class MonocularVSLAM:
             filtered_pose_theta=float(filt_pose.theta),
         )
 
+    def get_pose_estimate(self, *, filtered: bool = True) -> Pose:
+        pose = self._pose_filt if filtered and self._pose_filt is not None else self._raw_pose_latest
+        return _copy_pose(pose)
+
+    def set_pose_estimate(
+        self,
+        pose: Pose,
+        *,
+        reset_filter: bool = True,
+        sync_last_frame: bool = True,
+        publish: bool = False,
+    ) -> Pose:
+        pose_copy = _copy_pose(pose)
+        self._Tcw = self._planar_pose_to_Tcw(pose_copy)
+        self._raw_pose_latest = pose_copy
+
+        if reset_filter or self._pose_filt is None:
+            self._pose_filt = _copy_pose(pose_copy)
+        else:
+            self._pose_filt = _blend_pose(self._pose_filt, pose_copy, float(self.cfg.pose_ema_alpha))
+
+        if sync_last_frame and self._last is not None:
+            self._last.pose_Tcw = self._Tcw.copy()
+
+        if publish or bool(self.cfg.publish_pose_to_shared_map):
+            self.shared_map.set_pose(self.car_id, self.get_pose_estimate(filtered=True))
+
+        return self.get_pose_estimate(filtered=True)
+
     def slam_quality(self, *, min_confidence: float = 0.55) -> Tuple[float, bool, bool, int, float]:
         s = self.get_status()
         conf = float(s.confidence)
@@ -330,7 +414,7 @@ class MonocularVSLAM:
             )
             self._publish_pose(update_filter=False)
             self._annotate_debug_frames()
-            return self.shared_map.poses.get(self.car_id)
+            return self.get_pose_estimate(filtered=True)
 
         frame_delta_mean = self._frame_delta_mean(self._last.img_gray, cur.img_gray)
         if frame_delta_mean < float(self.cfg.stale_frame_delta_mean):
@@ -452,7 +536,7 @@ class MonocularVSLAM:
         self._last = cur
         self._publish_pose()
         self._annotate_debug_frames()
-        return self.shared_map.poses.get(self.car_id)
+        return self.get_pose_estimate(filtered=True)
 
     # ---------------- Pose publishing ----------------
 
@@ -476,19 +560,17 @@ class MonocularVSLAM:
 
                 self._pose_filt = Pose(x=float(xf), y=float(yf), theta=float(thf))
 
-        self.shared_map.set_pose(self.car_id, self._pose_filt)
+        if bool(self.cfg.publish_pose_to_shared_map):
+            self.shared_map.set_pose(self.car_id, self.get_pose_estimate(filtered=True))
 
     def _apply_planar_motion(self, *, forward_step: float, yaw_delta: float) -> None:
         pose = self._planar_pose_from_Tcw(self._Tcw)
-        step = float(forward_step)
-        dtheta = float(yaw_delta)
-
-        theta_mid = pose.theta + 0.5 * dtheta
-        x_new = pose.x + step * math.cos(theta_mid)
-        y_new = pose.y + step * math.sin(theta_mid)
-        theta_new = self._wrap_angle(pose.theta + dtheta)
-
-        self._Tcw = self._planar_pose_to_Tcw(Pose(x=float(x_new), y=float(y_new), theta=float(theta_new)))
+        next_pose = integrate_pose(
+            pose,
+            forward_step=forward_step,
+            yaw_delta=yaw_delta,
+        )
+        self._Tcw = self._planar_pose_to_Tcw(next_pose)
 
     def _planar_pose_from_Tcw(self, Tcw: np.ndarray) -> Pose:
         Twc = self._invert_se3(Tcw)
@@ -535,11 +617,7 @@ class MonocularVSLAM:
 
     @staticmethod
     def _wrap_angle(a: float) -> float:
-        while a > math.pi:
-            a -= 2.0 * math.pi
-        while a < -math.pi:
-            a += 2.0 * math.pi
-        return a
+        return wrap_angle(a)
 
     # ---------------- Status ----------------
 
@@ -675,7 +753,7 @@ class MonocularVSLAM:
         )
         self._publish_pose(update_filter=False)
         self._annotate_debug_frames()
-        return self.shared_map.poses.get(self.car_id)
+        return self.get_pose_estimate(filtered=True)
 
     # ---------------- Image preprocessing ----------------
 
@@ -1227,3 +1305,212 @@ class MonocularVSLAM:
             flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
         )
         return vis
+
+
+class ConservativePoseEstimator:
+    """
+    Dead-reckoning-first pose estimator with conservative, occasional visual corrections.
+
+    Dead reckoning always propagates the authoritative pose. Visual localization is only
+    called after enough elapsed motion/time, then gated against the dead-reckoning pose.
+    """
+
+    def __init__(
+        self,
+        shared_map: SharedMap,
+        *,
+        car_id: int = 0,
+        visual_localizer: Optional[MonocularVSLAM] = None,
+        cfg: Optional[ConservativeCorrectionConfig] = None,
+    ):
+        self.shared_map = shared_map
+        self.car_id = car_id
+        self.visual_localizer = visual_localizer
+        self.cfg = cfg or ConservativeCorrectionConfig()
+
+        self._pending_translation = 0.0
+        self._pending_yaw = 0.0
+        self._cycles_since_correction = 0
+        self._last_correction_time_s: Optional[float] = None
+        self._last_result = ConservativeCorrectionResult(
+            attempted=False,
+            accepted=False,
+            reason="startup",
+            dead_reckoning_pose=self.get_pose(frame="world"),
+        )
+
+        if self.visual_localizer is not None:
+            self.visual_localizer.cfg.publish_pose_to_shared_map = False
+            self.visual_localizer.set_pose_estimate(self.get_pose(frame="world"))
+
+    def get_pose(self, *, frame: Literal["world", "grid"] = "world") -> Pose:
+        pose_world = self.shared_map.get_pose(self.car_id, frame="world")
+        if pose_world is None:
+            pose_world = Pose(0.0, 0.0, 0.0)
+            self.shared_map.set_pose(self.car_id, pose_world)
+
+        if frame == "world":
+            return _copy_pose(pose_world)
+
+        pose_grid = self.shared_map.get_pose(self.car_id, frame="grid")
+        if pose_grid is not None:
+            return pose_grid
+
+        gx, gy = self.shared_map.world_to_grid_f(pose_world.x, pose_world.y)
+        return Pose(x=float(gx), y=float(gy), theta=float(pose_world.theta))
+
+    def get_last_result(self) -> ConservativeCorrectionResult:
+        return ConservativeCorrectionResult(
+            attempted=bool(self._last_result.attempted),
+            accepted=bool(self._last_result.accepted),
+            reason=str(self._last_result.reason),
+            dead_reckoning_pose=_copy_pose(self._last_result.dead_reckoning_pose),
+            obstacle_pose=None if self._last_result.obstacle_pose is None else _copy_pose(self._last_result.obstacle_pose),
+            fused_pose=None if self._last_result.fused_pose is None else _copy_pose(self._last_result.fused_pose),
+            position_error=float(self._last_result.position_error),
+            heading_error_deg=float(self._last_result.heading_error_deg),
+            visual_confidence=float(self._last_result.visual_confidence),
+        )
+
+    def propagate_dead_reckoning(self, *, forward_step: float, yaw_delta: float) -> Pose:
+        pose_world = self.get_pose(frame="world")
+        next_pose = integrate_pose(
+            pose_world,
+            forward_step=forward_step,
+            yaw_delta=yaw_delta,
+        )
+        self.shared_map.set_pose(self.car_id, next_pose)
+
+        self._pending_translation += float(forward_step)
+        self._pending_yaw += float(yaw_delta)
+        self._cycles_since_correction += 1
+        return next_pose
+
+    def should_run_obstacle_detection(self, *, now_s: Optional[float] = None, force: bool = False) -> bool:
+        if self.visual_localizer is None:
+            return False
+        if force:
+            return True
+        if self._cycles_since_correction < max(1, int(self.cfg.min_cycles_between_corrections)):
+            return False
+
+        enough_motion = (
+            abs(float(self._pending_translation)) >= float(self.cfg.min_translation_between_corrections)
+            or abs(math.degrees(float(self._pending_yaw))) >= float(self.cfg.min_heading_change_between_corrections_deg)
+        )
+        if not enough_motion:
+            return False
+
+        if now_s is None or self._last_correction_time_s is None:
+            return True
+        return (float(now_s) - float(self._last_correction_time_s)) >= float(self.cfg.min_seconds_between_corrections)
+
+    def maybe_correct_from_obstacle_detection(
+        self,
+        frame_rgb_or_bgr: Optional[np.ndarray] = None,
+        *,
+        frame_provider: Optional[Callable[[], Optional[np.ndarray]]] = None,
+        now_s: Optional[float] = None,
+        force: bool = False,
+    ) -> ConservativeCorrectionResult:
+        dead_reckoning_pose = self.get_pose(frame="world")
+
+        if self.visual_localizer is None:
+            self._last_result = ConservativeCorrectionResult(
+                attempted=False,
+                accepted=False,
+                reason="visual_disabled",
+                dead_reckoning_pose=_copy_pose(dead_reckoning_pose),
+                fused_pose=_copy_pose(dead_reckoning_pose),
+            )
+            return self.get_last_result()
+
+        if not self.should_run_obstacle_detection(now_s=now_s, force=force):
+            self._last_result = ConservativeCorrectionResult(
+                attempted=False,
+                accepted=False,
+                reason="not_needed",
+                dead_reckoning_pose=_copy_pose(dead_reckoning_pose),
+                fused_pose=_copy_pose(dead_reckoning_pose),
+            )
+            return self.get_last_result()
+
+        if frame_rgb_or_bgr is None and frame_provider is not None:
+            try:
+                frame_rgb_or_bgr = frame_provider()
+            except Exception:
+                self._last_result = ConservativeCorrectionResult(
+                    attempted=True,
+                    accepted=False,
+                    reason="frame_provider_error",
+                    dead_reckoning_pose=_copy_pose(dead_reckoning_pose),
+                    fused_pose=_copy_pose(dead_reckoning_pose),
+                )
+                return self.get_last_result()
+
+        if frame_rgb_or_bgr is None:
+            self._last_result = ConservativeCorrectionResult(
+                attempted=True,
+                accepted=False,
+                reason="no_frame",
+                dead_reckoning_pose=_copy_pose(dead_reckoning_pose),
+                fused_pose=_copy_pose(dead_reckoning_pose),
+            )
+            return self.get_last_result()
+
+        pending_translation = float(self._pending_translation)
+        pending_yaw = float(self._pending_yaw)
+        self._pending_translation = 0.0
+        self._pending_yaw = 0.0
+        self._cycles_since_correction = 0
+        self._last_correction_time_s = None if now_s is None else float(now_s)
+
+        obstacle_pose = self.visual_localizer.tick(
+            frame_rgb_or_bgr,
+            translation_step=pending_translation,
+            odom_yaw_delta=pending_yaw,
+        )
+        status = self.visual_localizer.get_status()
+
+        accepted = False
+        reason = "tracking_not_ok" if obstacle_pose is None else "accepted"
+        position_error = 0.0
+        heading_error_deg = 0.0
+        fused_pose = _copy_pose(dead_reckoning_pose)
+
+        if obstacle_pose is None:
+            obstacle_pose_copy = None
+        else:
+            obstacle_pose_copy = _copy_pose(obstacle_pose)
+            position_error = _pose_distance(dead_reckoning_pose, obstacle_pose_copy)
+            heading_error_deg = math.degrees(
+                _heading_difference(dead_reckoning_pose.theta, obstacle_pose_copy.theta)
+            )
+
+            if not bool(status.tracking_ok):
+                reason = f"tracking_{status.gate_reason}"
+            elif float(status.confidence) < float(self.cfg.min_visual_confidence):
+                reason = "low_confidence"
+            elif position_error > float(self.cfg.position_agreement_threshold):
+                reason = "position_mismatch"
+            elif heading_error_deg > float(self.cfg.heading_agreement_threshold_deg):
+                reason = "heading_mismatch"
+            else:
+                accepted = True
+                fused_pose = _blend_pose(dead_reckoning_pose, obstacle_pose_copy, float(self.cfg.correction_alpha))
+
+        self.shared_map.set_pose(self.car_id, fused_pose)
+        self.visual_localizer.set_pose_estimate(fused_pose, reset_filter=True, sync_last_frame=True)
+
+        self._last_result = ConservativeCorrectionResult(
+            attempted=True,
+            accepted=accepted,
+            reason=reason,
+            dead_reckoning_pose=_copy_pose(dead_reckoning_pose),
+            obstacle_pose=obstacle_pose_copy,
+            fused_pose=_copy_pose(fused_pose),
+            position_error=float(position_error),
+            heading_error_deg=float(heading_error_deg),
+            visual_confidence=float(status.confidence),
+        )
+        return self.get_last_result()

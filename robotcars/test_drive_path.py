@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Callable, Optional, Protocol
 
 import cv2
 
@@ -37,12 +37,22 @@ class DriveCommand:
     target_x: float
     target_y: float
     heading_error_deg: float
-    steer_deg: float
     drive_mode: str
     speed: int
-    odom_step_cells: float = 0.0
-    odom_yaw_deg: float = 0.0
     odom_steer_deg: float = 0.0
+
+
+class DrivePoseEstimator(Protocol):
+    def get_pose(self, *, frame: str = "world") -> Pose: ...
+    def propagate_dead_reckoning(self, *, forward_step: float, yaw_delta: float) -> Pose: ...
+    def maybe_correct_from_obstacle_detection(
+        self,
+        frame_rgb_or_bgr: Optional[Any] = None,
+        *,
+        frame_provider: Optional[Callable[[], Any]] = None,
+        now_s: Optional[float] = None,
+        force: bool = False,
+    ) -> Any: ...
 
 
 def _current_leg_path(path: Path, waypoint_idx: int) -> Path:
@@ -182,6 +192,76 @@ def _tick_ultrasonic(
     return dist_cm
 
 
+def _current_pose_grid(
+    *,
+    shared_map: SharedMap,
+    car_id: int,
+    pose_estimator: Optional[DrivePoseEstimator],
+) -> Pose:
+    pose_grid = shared_map.get_pose(car_id, frame="grid")
+    if pose_grid is not None:
+        return pose_grid
+
+    if pose_estimator is not None:
+        return pose_estimator.get_pose(frame="grid")
+
+    return integrate_dead_reckoning(
+        shared_map=shared_map,
+        car_id=car_id,
+        forward_step=0.0,
+        yaw_delta=0.0,
+    )
+
+
+def _propagate_pose(
+    *,
+    shared_map: SharedMap,
+    car_id: int,
+    pose_estimator: Optional[DrivePoseEstimator],
+    forward_step: float,
+    yaw_delta: float,
+) -> None:
+    if pose_estimator is None:
+        integrate_dead_reckoning(
+            shared_map=shared_map,
+            car_id=car_id,
+            forward_step=forward_step,
+            yaw_delta=yaw_delta,
+        )
+        return
+
+    pose_estimator.propagate_dead_reckoning(
+        forward_step=forward_step,
+        yaw_delta=yaw_delta,
+    )
+
+
+def _maybe_apply_visual_correction(
+    *,
+    pose_estimator: Optional[DrivePoseEstimator],
+    visual_frame_provider: Optional[Callable[[], Any]],
+    now_s: float,
+) -> None:
+    if pose_estimator is None or visual_frame_provider is None:
+        return
+
+    correction = pose_estimator.maybe_correct_from_obstacle_detection(
+        frame_provider=visual_frame_provider,
+        now_s=now_s,
+    )
+    if not correction.attempted:
+        return
+
+    print(
+        "visual_corr "
+        f"accepted={int(correction.accepted)} "
+        f"reason={correction.reason} "
+        f"pos_err={correction.position_error:.2f} "
+        f"head_err={correction.heading_error_deg:.1f} "
+        f"conf={correction.visual_confidence:.2f}"
+    )
+
+
 def _log_drive_status(
     *,
     pose_grid: Pose,
@@ -222,6 +302,8 @@ def drive_path(
     car_id: int = 0,
     timeout_s: float = 180.0,
     debug_show_grid: bool = False,
+    pose_estimator: Optional[DrivePoseEstimator] = None,
+    visual_frame_provider: Optional[Callable[[], Any]] = None,
 ) -> bool:
     if path is None or len(path.waypoints) < 2:
         raise ValueError("drive_path requires a Path with at least two waypoints")
@@ -248,14 +330,11 @@ def drive_path(
                     car_id=car_id,
                 )
 
-            pose_grid = shared_map.get_pose(car_id, frame="grid")
-            if pose_grid is None:
-                pose_grid = integrate_dead_reckoning(
-                    shared_map=shared_map,
-                    car_id=car_id,
-                    forward_step=0.0,
-                    yaw_delta=0.0,
-                )
+            pose_grid = _current_pose_grid(
+                shared_map=shared_map,
+                car_id=car_id,
+                pose_estimator=pose_estimator,
+            )
 
             active_wp = path.waypoints[current_wp_idx]
             goal_xy_grid = (int(round(active_wp.x)), int(round(active_wp.y)))
@@ -273,11 +352,6 @@ def drive_path(
                 d_goal = math.hypot(goal_xy_grid[0] - pose_grid.x, goal_xy_grid[1] - pose_grid.y)
                 pivot_active = abs(_heading_error_to_point_deg(pose_grid, active_wp)) > float(loop_cfg.pivot_turn_heading_deg)
 
-            if current_wp_idx >= len(path.waypoints):
-                motor.stop()
-                motor.mark_reached()
-                return True
-
             active_wp = path.waypoints[current_wp_idx]
             tracking_path = _current_leg_path(path, current_wp_idx)
             target_x, target_y, heading_error_deg, steer_deg = follower.tracking_command(
@@ -291,7 +365,6 @@ def drive_path(
             drive_mode = "track"
             drive_speed = int(motor.cfg.speed)
             odom_step_cells = 0.0
-            odom_yaw_deg = 0.0
             odom_steer_deg = motor.get_applied_steering_deg()
 
             if latest_ultra_cm is not None and latest_ultra_cm <= float(loop_cfg.ultra_stop_cm):
@@ -354,23 +427,25 @@ def drive_path(
                         odom_step_cells,
                         odom_steer_deg,
                     )
-                odom_yaw_deg = math.degrees(yaw_delta)
-                integrate_dead_reckoning(
+                _propagate_pose(
                     shared_map=shared_map,
                     car_id=car_id,
+                    pose_estimator=pose_estimator,
                     forward_step=odom_step_cells,
                     yaw_delta=yaw_delta,
+                )
+                _maybe_apply_visual_correction(
+                    pose_estimator=pose_estimator,
+                    visual_frame_provider=visual_frame_provider,
+                    now_s=time.time(),
                 )
 
             command = DriveCommand(
                 target_x=target_x,
                 target_y=target_y,
                 heading_error_deg=heading_error_deg,
-                steer_deg=steer_deg,
                 drive_mode=drive_mode,
                 speed=drive_speed,
-                odom_step_cells=odom_step_cells,
-                odom_yaw_deg=odom_yaw_deg,
                 odom_steer_deg=odom_steer_deg,
             )
 
