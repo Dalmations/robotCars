@@ -27,33 +27,22 @@ class GridConfig:
     resolution: float = 1.0
     origin_world: Tuple[float, float] = (0.0, 0.0)
 
-    def center_cell(self) -> Tuple[float, float]:
-        return (self.size[0] / 2.0, self.size[1] / 2.0)
-
-    def set_center_world(self, center_world: Tuple[float, float]) -> None:
-        cx_cell, cy_cell = self.center_cell()
-        ox = float(center_world[0]) - cx_cell * float(self.resolution)
-        oy = float(center_world[1]) - cy_cell * float(self.resolution)
-        self.origin_world = (ox, oy)
-
 
 @dataclass
 class SharedMap:
     """
-    Shared state for planning and localization.
+    Shared state for navigation.
 
     - `poses` are stored in world coordinates.
     - `obstacles` are stored in world coordinates.
-    - `map_points` are sparse SLAM points stored as world-space tuples.
     """
     obstacles: Dict[str, Obstacle] = field(default_factory=dict)
     poses: Dict[int, Pose] = field(default_factory=dict)
-    map_points: List[Tuple[float, float, float]] = field(default_factory=list)
 
     _static_grid: Optional[np.ndarray] = None
     grid: GridConfig = field(default_factory=GridConfig)
 
-    # ---------------- Pose + SLAM points ----------------
+    # ---------------- Pose state ----------------
 
     def set_pose(self, car_id: int, pose: Pose) -> None:
         self.poses[car_id] = pose
@@ -67,23 +56,9 @@ class SharedMap:
         gx, gy = self.world_to_grid_f(pose.x, pose.y)
         return Pose(x=float(gx), y=float(gy), theta=float(pose.theta))
 
-    def add_map_points(self, pts3: np.ndarray, *, max_points: int = 5000, stride: int = 1) -> None:
-        if pts3 is None or not isinstance(pts3, np.ndarray) or pts3.size == 0:
-            return
-
-        pts3 = np.asarray(pts3, dtype=np.float32).reshape(-1, 3)
-        if stride > 1:
-            pts3 = pts3[::stride]
-
-        self.map_points.extend((float(x), float(y), float(z)) for x, y, z in pts3)
-
-        if max_points > 0 and len(self.map_points) > max_points:
-            self.map_points = self.map_points[-max_points:]
-
     def reset(self) -> None:
         self.obstacles.clear()
         self.poses.clear()
-        self.map_points.clear()
 
     # ---------------- World <-> Grid ----------------
 
@@ -92,14 +67,20 @@ class SharedMap:
         *,
         size: Tuple[int, int] = (50, 50),
         resolution: float = 1.0,
+        origin_world: Tuple[float, float] = (0.0, 0.0),
     ) -> None:
         self.grid.size = size
         self.grid.resolution = float(resolution)
+        self.grid.origin_world = (
+            float(origin_world[0]),
+            float(origin_world[1]),
+        )
 
     def world_to_grid_f(self, x: float, y: float) -> Tuple[float, float]:
         r = float(self.grid.resolution)
-        gx = x / r
-        gy = y / r
+        ox, oy = self.grid.origin_world
+        gx = (float(x) - float(ox)) / r
+        gy = (float(y) - float(oy)) / r
         return gx, gy
 
     def world_to_grid(self, x: float, y: float, *, clamp: bool = True) -> GridPoint:
@@ -114,15 +95,15 @@ class SharedMap:
 
     def grid_to_world_f(self, gx: float, gy: float) -> Tuple[float, float]:
         r = float(self.grid.resolution)
-        x = gx * r
-        y = gy * r
+        ox, oy = self.grid.origin_world
+        x = float(ox) + float(gx) * r
+        y = float(oy) + float(gy) * r
         return x, y
 
     def get_car_grid_position(self, car_id: int = 0) -> GridPoint:
         pose = self.poses.get(car_id)
         if pose is None:
-            cx, cy = self.grid.center_cell()
-            return (int(round(cx)), int(round(cy)))
+            return (0, 0)
         return self.world_to_grid(pose.x, pose.y)
 
     # ---------------- Occupancy ----------------
@@ -133,10 +114,6 @@ class SharedMap:
     def to_occupancy_grid(
         self,
         size: Optional[Tuple[int, int]] = None,
-        *,
-        include_slam_points: bool = False,
-        slam_points_radius_cells: int = 0,
-        slam_points_max: int = 1500,
     ) -> np.ndarray:
         if self._static_grid is not None:
             return np.array(self._static_grid, copy=True)
@@ -153,20 +130,6 @@ class SharedMap:
             y0, y1 = max(0, gy - r_cells), min(h, gy + r_cells + 1)
             grid[x0:x1, y0:y1] = 1
 
-        if include_slam_points and self.map_points:
-            points = self.map_points[-slam_points_max:] if slam_points_max > 0 else self.map_points
-            radius = int(slam_points_radius_cells)
-
-            for xw, yw, _zw in points:
-                gx, gy = self.world_to_grid(xw, yw, clamp=False)
-                if 0 <= gx < w and 0 <= gy < h:
-                    if radius <= 0:
-                        grid[gx, gy] = 1
-                    else:
-                        x0, x1 = max(0, gx - radius), min(w, gx + radius + 1)
-                        y0, y1 = max(0, gy - radius), min(h, gy + radius + 1)
-                        grid[x0:x1, y0:y1] = 1
-
         return grid
 
     def add_ultra_obstacle(
@@ -176,8 +139,6 @@ class SharedMap:
         dist_cm: Optional[float],
         obstacle_id: str = "ultra_front",
         cm_per_grid: float = 50.0,
-        ahead_cm_min: float = 5.0,
-        ahead_cm_max: float = 120.0,
     ) -> bool:
         """
         Insert a front ultrasonic obstacle in world coordinates.
@@ -186,7 +147,7 @@ class SharedMap:
             self.obstacles.pop(obstacle_id, None)
             return False
 
-        d_cm = float(np.clip(float(dist_cm), ahead_cm_min, ahead_cm_max))
+        d_cm = float(dist_cm)
         d_cells = d_cm / max(1e-6, float(cm_per_grid))
 
         ox = float(pose_world.x + d_cells * math.cos(pose_world.theta))
@@ -212,8 +173,6 @@ class SharedMap:
         target: Optional[TargetPoint] = None,
         control_target: Optional[TargetPoint] = None,
         size: Optional[Tuple[int, int]] = None,
-        include_slam_points: bool = False,
-        slam_points_max: int = 1000,
         cell_px: int = 14,
         margin_px: int = 24,
         info_lines: Optional[List[str]] = None,
@@ -226,7 +185,7 @@ class SharedMap:
         cell_px = max(8, int(cell_px))
         margin_px = max(8, int(margin_px))
 
-        grid = self.to_occupancy_grid(size=size, include_slam_points=include_slam_points)
+        grid = self.to_occupancy_grid(size=size)
 
         free_color = np.array((242, 244, 246), dtype=np.uint8)
         obstacle_color = np.array((70, 85, 165), dtype=np.uint8)
@@ -235,7 +194,6 @@ class SharedMap:
         target_color = (0, 210, 255)
         control_target_color = (0, 165, 255)
         pose_color = (46, 184, 92)
-        slam_color = (148, 148, 148)
         text_color = (40, 40, 40)
         heading_line_color = (110, 135, 165)
 
@@ -267,16 +225,6 @@ class SharedMap:
             if x1 <= x0 or y1 <= y0:
                 return
             canvas[y0:y1, x0:x1] = np.array(color, dtype=np.uint8)
-
-        if include_slam_points and self.map_points:
-            points = self.map_points[-slam_points_max:] if slam_points_max > 0 else self.map_points
-            for xw, yw, _zw in points:
-                gx, gy = self.world_to_grid(xw, yw, clamp=False)
-                if 0 <= gx < w and 0 <= gy < h:
-                    if cv2 is not None:
-                        cv2.circle(canvas, grid_to_px(gx, gy), max(1, cell_px // 6), slam_color, -1, lineType=cv2.LINE_AA)
-                    else:
-                        fill_cell(gx, gy, slam_color, pad=max(3, cell_px // 3))
 
         if cv2 is not None:
             for gx in range(w + 1):

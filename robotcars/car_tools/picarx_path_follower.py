@@ -6,7 +6,6 @@ from typing import Optional, Tuple
 
 from model import Path, Pose
 from car_tools.motor_controller import MotorController
-from coordination.shared_map import SharedMap
 
 
 def wrap_angle(a: float) -> float:
@@ -30,29 +29,21 @@ def estimate_step_cells_for_duration(
     speed_cmd = float(max(0, min(100, int(speed))))
     return ref_step * (speed_cmd / speed_ref)
 
-
-def integrate_dead_reckoning(
+def predict_dead_reckoning_pose(
+    pose_world: Pose,
     *,
-    shared_map: SharedMap,
-    car_id: int,
     forward_step: float,
     yaw_delta: float,
 ) -> Pose:
-    pose_world = shared_map.get_pose(car_id, frame="world")
-    if pose_world is None:
-        pose_world = Pose(0.0, 0.0, 0.0)
-
     step = float(forward_step)
     dtheta = float(yaw_delta)
     theta_mid = float(pose_world.theta) + 0.5 * dtheta
 
-    next_pose = Pose(
+    return Pose(
         x=float(pose_world.x + step * math.cos(theta_mid)),
         y=float(pose_world.y + step * math.sin(theta_mid)),
         theta=float(wrap_angle(float(pose_world.theta) + dtheta)),
     )
-    shared_map.set_pose(car_id, next_pose)
-    return next_pose
 
 @dataclass
 class FollowerConfig:

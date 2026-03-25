@@ -10,7 +10,6 @@ class Config:
     assignment: object = None
     camera: object = None
     vision: object = None
-    planning: object = None
     motion: object = None
     motor: object = None
 
