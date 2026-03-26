@@ -160,14 +160,17 @@ class VslamStatus:
 
 @dataclass
 class ConservativeCorrectionConfig:
+    # How frugal to be about running the visual front-end at all.
     min_cycles_between_corrections: int = 4
     min_seconds_between_corrections: float = 0.4
     min_translation_between_corrections: float = 0.75
     min_heading_change_between_corrections_deg: float = 8.0
 
+    # Visual pose must agree with dead reckoning to be trusted.
     position_agreement_threshold: float = 0.75
     heading_agreement_threshold_deg: float = 12.0
 
+    # Accepted corrections are blended in gradually instead of snapping.
     correction_alpha: float = 0.25
     min_visual_confidence: float = 0.55
 
@@ -1465,12 +1468,25 @@ class ConservativePoseEstimator:
         self._cycles_since_correction = 0
         self._last_correction_time_s = None if now_s is None else float(now_s)
 
-        obstacle_pose = self.visual_localizer.tick(
-            frame_rgb_or_bgr,
-            translation_step=pending_translation,
-            odom_yaw_delta=pending_yaw,
-        )
-        status = self.visual_localizer.get_status()
+        try:
+            obstacle_pose = self.visual_localizer.tick(
+                frame_rgb_or_bgr,
+                translation_step=pending_translation,
+                odom_yaw_delta=pending_yaw,
+            )
+            status = self.visual_localizer.get_status()
+        except Exception:
+            fused_pose = _copy_pose(dead_reckoning_pose)
+            self.shared_map.set_pose(self.car_id, fused_pose)
+            self.visual_localizer.set_pose_estimate(fused_pose, reset_filter=True, sync_last_frame=True)
+            self._last_result = ConservativeCorrectionResult(
+                attempted=True,
+                accepted=False,
+                reason="visual_exception",
+                dead_reckoning_pose=_copy_pose(dead_reckoning_pose),
+                fused_pose=fused_pose,
+            )
+            return self.get_last_result()
 
         accepted = False
         reason = "tracking_not_ok" if obstacle_pose is None else "accepted"

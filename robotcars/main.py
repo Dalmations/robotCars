@@ -7,7 +7,7 @@ from typing import Callable, Optional
 
 import cv2
 
-from car_tools.camera_input import OpenCvFrameProvider
+from car_tools.camera_input import CameraConfig, OpenCvFrameProvider, PiCarXCamera
 from car_tools.movement import build_square_route, route_to_path
 from car_tools.motor_controller import MotorConfig, MotorController
 from car_tools.obstacle_detection import (
@@ -78,7 +78,16 @@ def build_visual_test_stack(
     *,
     car_id: int = 0,
 ) -> tuple[Optional[ConservativePoseEstimator], Optional[Callable[[], object]], Optional[Callable[[], None]]]:
-    frame_provider = OpenCvFrameProvider(device_index=0, width=640, height=480)
+    frame_provider = PiCarXCamera(CameraConfig(
+        display_local=False,
+        display_web=False,
+        frame_size=(640, 480),
+        frame_rate=30,
+    ))
+    frame_provider.start()
+    if not frame_provider.is_opened():
+        frame_provider.release()
+        frame_provider = OpenCvFrameProvider(device_index=0, width=640, height=480)
     if not frame_provider.is_opened():
         frame_provider.release()
         return None, None, None
