@@ -12,9 +12,7 @@ from car_tools.camera_input import read_ultrasonic_cm
 from coordination.shared_map import SharedMap
 from car_tools.motor_controller import MotorController
 from car_tools.picarx_path_follower import (
-    PathFollower,
-    estimate_step_cells_for_duration,
-    integrate_dead_reckoning,
+    PurePursuitFollower,
 )
 from model import Path, Pose, TargetPoint
 
@@ -196,6 +194,7 @@ def _tick_ultrasonic(
 def _current_pose_grid(
     *,
     shared_map: SharedMap,
+    follower: PurePursuitFollower,
     car_id: int,
     pose_estimator: Optional[DrivePoseEstimator],
 ) -> Pose:
@@ -206,7 +205,7 @@ def _current_pose_grid(
     if pose_estimator is not None:
         return pose_estimator.get_pose(frame="grid")
 
-    return integrate_dead_reckoning(
+    return follower.integrate_dead_reckoning(
         shared_map=shared_map,
         car_id=car_id,
         forward_step=0.0,
@@ -318,7 +317,7 @@ def drive_path(
     path: Path,
     *,
     shared_map: SharedMap,
-    follower: PathFollower,
+    follower: PurePursuitFollower,
     motor: MotorController,
     loop_cfg: LoopConfig,
     car_id: int = 0,
@@ -355,6 +354,7 @@ def drive_path(
 
             pose_grid = _current_pose_grid(
                 shared_map=shared_map,
+                follower=follower,
                 car_id=car_id,
                 pose_estimator=pose_estimator,
             )
@@ -438,7 +438,7 @@ def drive_path(
                     motor.backward_for(pivot_duration_s, speed=drive_speed)
                     follower.sync_to_motor_steering()
                 else:
-                    odom_step_cells = estimate_step_cells_for_duration(
+                    odom_step_cells = follower.estimate_step_cells_for_duration(
                         float(loop_cfg.action_tick_s),
                         action_tick_s=float(loop_cfg.action_tick_s),
                         speed=drive_speed,

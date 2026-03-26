@@ -18,64 +18,6 @@ TickCallback = Callable[[float, float, float], None]  # x, y, yaw (grid units, r
 if TYPE_CHECKING:
     from car_tools.motor_controller import MotorController
 
-
-def wrap_angle(a: float) -> float:
-    while a > math.pi:
-        a -= 2.0 * math.pi
-    while a < -math.pi:
-        a += 2.0 * math.pi
-    return a
-
-
-def integrate_pose(
-    pose: Pose,
-    *,
-    forward_step: float,
-    yaw_delta: float,
-) -> Pose:
-    step = float(forward_step)
-    dtheta = float(yaw_delta)
-    theta_mid = float(pose.theta) + 0.5 * dtheta
-    return Pose(
-        x=float(pose.x + step * math.cos(theta_mid)),
-        y=float(pose.y + step * math.sin(theta_mid)),
-        theta=float(wrap_angle(float(pose.theta) + dtheta)),
-    )
-
-
-def estimate_step_cells_for_duration(
-    duration_s: float,
-    *,
-    action_tick_s: float,
-    speed: int,
-    speed_ref: int,
-) -> float:
-    tick_count = float(duration_s) / float(max(1e-6, action_tick_s))
-    ref_step = tick_count / 5.0
-    speed_ref = max(1.0, float(speed_ref))
-    speed_cmd = float(max(0, min(100, int(speed))))
-    return ref_step * (speed_cmd / speed_ref)
-
-
-def integrate_dead_reckoning(
-    *,
-    shared_map: SharedMap,
-    car_id: int,
-    forward_step: float,
-    yaw_delta: float,
-) -> Pose:
-    pose_world = shared_map.get_pose(car_id, frame="world")
-    if pose_world is None:
-        pose_world = Pose(0.0, 0.0, 0.0)
-
-    next_pose = integrate_pose(
-        pose_world,
-        forward_step=forward_step,
-        yaw_delta=yaw_delta,
-    )
-    shared_map.set_pose(car_id, next_pose)
-    return next_pose
-
 @dataclass
 class FollowerConfig:
     """
@@ -97,6 +39,17 @@ class FollowerConfig:
 
     safe_dist: float = 40.0        # cm: Start slowing down
     stop_dist: float = 10.0        # cm: Complete stop
+
+    steer_sign: float = 1.0                    # follower steering sign
+
+    steer_alpha: float = 0.25                  # steering blend factor
+    steer_deadband_deg: float = 2.0            # ignore tiny steer
+    steer_rate_limit_deg_per_tick: float = 12.0  # max steer change
+    heading_lookahead_gain: float = 0.012
+    heading_lookahead_max_scale: float = 1.75
+
+    dock_distance_grid: float = 12.0           # near goal threshold
+    dock_min_lookahead_grid: float = 6.0       # minimum dock lookahead
 
 
 class Pose2D:
@@ -124,6 +77,7 @@ class PurePursuitFollower:
         self.motor = motor
         self.cfg = cfg or FollowerConfig()
         self.params = params
+        self._filtered_steer_deg = 0.0
         
 
     # def follow(self, path: Path, start_pose: Optional[Pose2D] = None) -> None:
@@ -261,6 +215,10 @@ class PurePursuitFollower:
     @staticmethod
     def _dist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
         return math.hypot(a[0] - b[0], a[1] - b[1])
+    
+    @staticmethod
+    def _dist(x0: float, y0: float, x1: float, y1: float) -> float:
+        return float(math.hypot(x1 - x0, y1 - y0))
 
     @staticmethod
     def _wrap_angle(a: float) -> float:
@@ -269,78 +227,7 @@ class PurePursuitFollower:
         while a < -math.pi:
             a += 2.0 * math.pi
         return a
-
-
-def wrap_angle(a: float) -> float:
-    while a > math.pi:
-        a -= 2.0 * math.pi
-    while a < -math.pi:
-        a += 2.0 * math.pi
-    return a
-
-
-def estimate_step_cells_for_duration(
-    duration_s: float,
-    *,
-    action_tick_s: float,
-    speed: int,
-    speed_ref: int,
-) -> float:
-    tick_count = float(duration_s) / float(max(1e-6, action_tick_s))
-    ref_step = tick_count / 5.0
-    speed_ref = max(1.0, float(speed_ref))
-    speed_cmd = float(max(0, min(100, int(speed))))
-    return ref_step * (speed_cmd / speed_ref)
-
-
-def integrate_dead_reckoning(
-    *,
-    shared_map: SharedMap,
-    car_id: int,
-    forward_step: float,
-    yaw_delta: float,
-) -> Pose:
-    pose_world = shared_map.get_pose(car_id, frame="world")
-    if pose_world is None:
-        pose_world = Pose(0.0, 0.0, 0.0)
-
-    step = float(forward_step)
-    dtheta = float(yaw_delta)
-    theta_mid = float(pose_world.theta) + 0.5 * dtheta
-
-    next_pose = Pose(
-        x=float(pose_world.x + step * math.cos(theta_mid)),
-        y=float(pose_world.y + step * math.sin(theta_mid)),
-        theta=float(wrap_angle(float(pose_world.theta) + dtheta)),
-    )
-    shared_map.set_pose(car_id, next_pose)
-    return next_pose
-
-@dataclass
-class PathFollowerConfig:
-    lookahead: float = 6.0                     # path lookahead distance
-    wheelbase: float = 5.0                     # bicycle model wheelbase
-    goal_tolerance: float = 2.0                # goal reached radius
-
-    steer_sign: float = 1.0                    # follower steering sign
-    max_steer_deg: float = 35.0
-
-    steer_alpha: float = 0.25                  # steering blend factor
-    steer_deadband_deg: float = 2.0            # ignore tiny steer
-    steer_rate_limit_deg_per_tick: float = 12.0  # max steer change
-    heading_lookahead_gain: float = 0.012
-    heading_lookahead_max_scale: float = 1.75
-
-    dock_distance_grid: float = 12.0           # near goal threshold
-    dock_min_lookahead_grid: float = 6.0       # minimum dock lookahead
-
-
-class PathFollower:
-    def __init__(self, motor: MotorController, cfg: Optional[PathFollowerConfig] = None):
-        self.motor = motor
-        self.cfg = cfg or PathFollowerConfig()
-        self._filtered_steer_deg = 0.0
-
+    
     def reset(self) -> None:
         self._filtered_steer_deg = 0.0
         if hasattr(self.motor, "reset_reached"):
@@ -359,7 +246,7 @@ class PathFollower:
             return max(self.cfg.dock_min_lookahead_grid, min(lookahead, 0.8 * goal_distance))  # Use shorter dock lookahead
         return lookahead
 
-    def _lookahead_point(self, path: Path, pose: Pose, lookahead_distance: float) -> Tuple[float, float]:
+    def _lookahead_target(self, path: Path, pose: Pose, lookahead_distance: float) -> Tuple[float, float]:
         waypoints = path.waypoints
         if not waypoints:
             return (pose.x, pose.y)
@@ -411,7 +298,7 @@ class PathFollower:
 
     def _pure_pursuit_delta(self, pose: Pose, target_x: float, target_y: float) -> float:
         path_angle = math.atan2(target_y - pose.y, target_x - pose.x)
-        alpha = wrap_angle(path_angle - pose.theta)
+        alpha = self._wrap_angle(path_angle - pose.theta)
 
         lookahead_distance = max(1e-6, self._dist(pose.x, pose.y, target_x, target_y))
         wheelbase = max(1e-6, float(self.cfg.wheelbase))  # Use model wheelbase
@@ -420,8 +307,8 @@ class PathFollower:
 
     def tracking_geometry(self, path: Path, pose: Pose, goal_distance: float) -> Tuple[float, float, float]:
         lookahead = self._compute_lookahead(goal_distance)
-        target_x, target_y = self._lookahead_point(path, pose, lookahead)
-        heading_error_rad = wrap_angle(math.atan2(target_y - pose.y, target_x - pose.x) - pose.theta)
+        target_x, target_y = self._lookahead_target(path, pose, lookahead)
+        heading_error_rad = self._wrap_angle(math.atan2(target_y - pose.y, target_x - pose.x) - pose.theta)
         heading_error_deg = math.degrees(heading_error_rad)
 
         if abs(heading_error_deg) > 20.0:
@@ -434,8 +321,8 @@ class PathFollower:
             else:
                 tighten_scale = max(0.55, 1.0 - 0.004 * (abs(heading_error_deg) - 20.0))
                 adjusted_lookahead = max(float(self.cfg.dock_min_lookahead_grid), lookahead * tighten_scale)
-            target_x, target_y = self._lookahead_point(path, pose, adjusted_lookahead)
-            heading_error_rad = wrap_angle(math.atan2(target_y - pose.y, target_x - pose.x) - pose.theta)
+            target_x, target_y = self._lookahead_target(path, pose, adjusted_lookahead)
+            heading_error_rad = self._wrap_angle(math.atan2(target_y - pose.y, target_x - pose.x) - pose.theta)
             heading_error_deg = math.degrees(heading_error_rad)
         return target_x, target_y, heading_error_deg
 
@@ -484,6 +371,36 @@ class PathFollower:
     def _clamp_steer(self, steer_deg: float) -> float:
         return max(-self.cfg.max_steer_deg, min(self.cfg.max_steer_deg, steer_deg))
 
-    @staticmethod
-    def _dist(x0: float, y0: float, x1: float, y1: float) -> float:
-        return float(math.hypot(x1 - x0, y1 - y0))
+    def integrate_dead_reckoning(
+        *,
+        shared_map: SharedMap,
+        car_id: int,
+        forward_step: float,
+        yaw_delta: float,
+    ) -> Pose:
+        pose_world = shared_map.get_pose(car_id, frame="world")
+        if pose_world is None:
+            pose_world = Pose(0.0, 0.0, 0.0)
+        step = float(forward_step)
+        dtheta = float(yaw_delta)
+        theta_mid = float(pose_world.theta) + 0.5 * dtheta
+        next_pose = Pose(
+            x=float(pose_world.x + step * math.cos(theta_mid)),
+            y=float(pose_world.y + step * math.sin(theta_mid)),
+            theta=float(self._wrap_angle(float(pose_world.theta) + dtheta)),
+        )
+        shared_map.set_pose(car_id, next_pose)
+        return next_pose
+    
+    def estimate_step_cells_for_duration(
+        duration_s: float,
+        *,
+        action_tick_s: float,
+        speed: int,
+        speed_ref: int,
+    ) -> float:
+        tick_count = float(duration_s) / float(max(1e-6, action_tick_s))
+        ref_step = tick_count / 5.0
+        speed_ref = max(1.0, float(speed_ref))
+        speed_cmd = float(max(0, min(100, int(speed))))
+        return ref_step * (speed_cmd / speed_ref)
