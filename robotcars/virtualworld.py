@@ -1,6 +1,7 @@
-# virtual_world.py
+# virtualworld.py
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from heapq import heappop, heappush
 from typing import Iterable, List, Optional, Tuple
@@ -9,41 +10,18 @@ import numpy as np
 
 Grid = np.ndarray
 Point = Tuple[int, int]  # (x, y)
+SQRT2 = math.sqrt(2.0)
 
 
-@dataclass(frozen=True)
-class VirtualWorld:
+def heuristic_octile(a: Point, b: Point) -> float:
     """
-    Holds an occupancy grid (0=free, 1=obstacle) and an optional height map.
-    By default, the world is EMPTY (no obstacles) unless you add them explicitly.
+    Best-practice heuristic for 8-connected grids with costs:
+      straight: 1, diagonal: sqrt(2)
     """
-    grid: Grid
-    height: Optional[Grid] = None
-
-    @property
-    def size(self) -> Tuple[int, int]:
-        w, h = self.grid.shape
-        return w, h
-
-    def in_bounds(self, p: Point) -> bool:
-        x, y = p
-        w, h = self.size
-        return 0 <= x < w and 0 <= y < h
-
-    def is_free(self, p: Point) -> bool:
-        x, y = p
-        return self.grid[x, y] == 0
-
-    def add_rect_obstacle(self, x0: int, x1: int, y0: int, y1: int) -> None:
-        """In-place add an axis-aligned rectangular obstacle."""
-        self.grid[x0:x1, y0:y1] = 1
-        if self.height is not None:
-            self.height[self.grid == 1] += 3.0
-
-
-
-def heuristic(a: Point, b: Point) -> float:
-    return float(np.linalg.norm(np.array(a) - np.array(b)))
+    dx = abs(a[0] - b[0])
+    dy = abs(a[1] - b[1])
+    # D=1, D2=sqrt(2)
+    return (dx + dy) + (SQRT2 - 2.0) * min(dx, dy)
 
 
 def iter_neighbors_8() -> Iterable[Tuple[int, int, float]]:
@@ -51,18 +29,29 @@ def iter_neighbors_8() -> Iterable[Tuple[int, int, float]]:
     8-connected grid: dx, dy, step_cost.
     """
     moves = [
-        (1, 0), (-1, 0), (0, 1), (0, -1),
-        (1, 1), (1, -1), (-1, 1), (-1, -1),
+        (1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
+        (1, 1, SQRT2), (1, -1, SQRT2), (-1, 1, SQRT2), (-1, -1, SQRT2),
     ]
-    for dx, dy in moves:
-        yield dx, dy, float(np.hypot(dx, dy))
+    for dx, dy, c in moves:
+        yield dx, dy, c
 
 
-def astar(grid: Grid, start: Point, goal: Point) -> Optional[List[Point]]:
+def astar(
+    grid: Grid,
+    start: Point,
+    goal: Point,
+    *,
+    allow_corner_cutting: bool = False,
+    heuristic_weight: float = 1.0,
+) -> Optional[List[Point]]:
     """
     grid: 2D numpy array, 0 = free, 1 = obstacle
     start, goal: (x, y)
     Returns: list of (x, y) points, or None if no path.
+    blocks diagonal step if either adjacent cardinal cell is occupied
+    heuristic_weight:
+      1.0 => optimal A*
+      >1.0 => weighted A* faster
     """
     w, h = grid.shape
     sx, sy = start
@@ -72,31 +61,33 @@ def astar(grid: Grid, start: Point, goal: Point) -> Optional[List[Point]]:
     if grid[sx, sy] == 1 or grid[gx, gy] == 1:
         return None
 
-    open_set = []
-    heappush(open_set, (heuristic(start, goal), 0.0, start, None))
+    hw = float(max(1.0, heuristic_weight))
 
-    came_from: dict[Point, Optional[Point]] = {}
+    open_heap: List[Tuple[float, float, Point]] = []
+    heappush(open_heap, (hw * heuristic_octile(start, goal), 0.0, start))
+
+    came_from: dict[Point, Optional[Point]] = {start: None}
     g_score: dict[Point, float] = {start: 0.0}
-    visited: set[Point] = set()
+    closed: set[Point] = set()
 
-    while open_set:
-        _, cost, current, parent = heappop(open_set)
+    while open_heap:
+        _f, g, cur = heappop(open_heap)
 
-        if current in visited:
+        if cur in closed:
             continue
-        visited.add(current)
-        came_from[current] = parent
+        closed.add(cur)
 
-        if current == goal:
+        if cur == goal:
+            # reconstruct
             path: List[Point] = []
-            node: Optional[Point] = current
+            node: Optional[Point] = cur
             while node is not None:
                 path.append(node)
-                node = came_from[node]
+                node = came_from.get(node)
             path.reverse()
             return path
 
-        cx, cy = current
+        cx, cy = cur
         for dx, dy, step_cost in iter_neighbors_8():
             nx, ny = cx + dx, cy + dy
             if nx < 0 or ny < 0 or nx >= w or ny >= h:
@@ -104,11 +95,17 @@ def astar(grid: Grid, start: Point, goal: Point) -> Optional[List[Point]]:
             if grid[nx, ny] == 1:
                 continue
 
-            new_cost = cost + step_cost
+            # prevent diagonal corner-cutting
+            if not allow_corner_cutting and dx != 0 and dy != 0:
+                if grid[cx + dx, cy] == 1 or grid[cx, cy + dy] == 1:
+                    continue
+
+            ng = g + step_cost
             nxt = (nx, ny)
-            if nxt not in g_score or new_cost < g_score[nxt]:
-                g_score[nxt] = new_cost
-                f = new_cost + heuristic(nxt, goal)
-                heappush(open_set, (f, new_cost, nxt, current))
+            if nxt not in g_score or ng < g_score[nxt]:
+                g_score[nxt] = ng
+                came_from[nxt] = cur
+                nf = ng + hw * heuristic_octile(nxt, goal)
+                heappush(open_heap, (nf, ng, nxt))
 
     return None

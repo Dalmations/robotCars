@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import math
+import math
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Callable, Optional, Protocol
 
 import cv2
 
@@ -27,8 +28,32 @@ class LoopConfig:
     pivot_turn_exit_deg: float = 20.0
     pivot_turn_steer_deg: float = 30.0
     pivot_turn_settle_s: float = 0.12
+    pivot_turn_ref_speed: int = 26
     pivot_turn_deg_per_s: float = 12.0
     pivot_turn_cells_per_deg: float = 0.05
+
+
+@dataclass
+class DriveCommand:
+    target_x: float
+    target_y: float
+    heading_error_deg: float
+    commanded_steer_deg: float
+    drive_mode: str
+    speed: int
+    odom_steer_deg: float = 0.0
+
+
+class DrivePoseEstimator(Protocol):
+    def get_pose(self, *, frame: str = "world") -> Pose: ...
+    def propagate_dead_reckoning(self, *, forward_step: float, yaw_delta: float) -> Pose: ...
+    def maybe_correct_from_obstacle_detection(
+        self,
+        frame_rgb_or_bgr: Optional[Any] = None,
+        *,
+        frame_provider: Optional[Callable[[], Any]] = None,
+        now_s: Optional[float] = None,
+    ) -> Any: ...
 
 
 def _current_leg_path(path: Path, waypoint_idx: int) -> Path:
@@ -54,6 +79,7 @@ def _heading_error_to_point_deg(pose: Pose, target: TargetPoint) -> float:
 def _pivot_reverse_duration_s(
     *,
     loop_cfg: LoopConfig,
+    drive_speed: int,
     heading_error_deg: float,
 ) -> float:
     remaining_error_deg = max(
@@ -63,7 +89,8 @@ def _pivot_reverse_duration_s(
     if remaining_error_deg <= 1e-6:
         return 0.0
 
-    yaw_deg_per_s = float(loop_cfg.pivot_turn_deg_per_s)
+    ref_speed = max(1.0, float(loop_cfg.pivot_turn_ref_speed))
+    yaw_deg_per_s = float(loop_cfg.pivot_turn_deg_per_s) * (float(drive_speed) / ref_speed)
     if yaw_deg_per_s <= 1e-6:
         return float(loop_cfg.action_tick_s)
 
@@ -76,10 +103,12 @@ def _pivot_reverse_duration_s(
 def _pivot_reverse_yaw_delta_rad(
     *,
     loop_cfg: LoopConfig,
+    drive_speed: int,
     heading_error_deg: float,
     duration_s: float,
 ) -> float:
-    yaw_deg_per_s = float(loop_cfg.pivot_turn_deg_per_s)
+    ref_speed = max(1.0, float(loop_cfg.pivot_turn_ref_speed))
+    yaw_deg_per_s = float(loop_cfg.pivot_turn_deg_per_s) * (float(drive_speed) / ref_speed)
     yaw_deg = min(
         max(0.0, abs(float(heading_error_deg)) - float(loop_cfg.pivot_turn_exit_deg)),
         yaw_deg_per_s * float(duration_s),
@@ -163,6 +192,128 @@ def _tick_ultrasonic(
 
     return dist_cm
 
+
+def _current_pose_grid(
+    *,
+    shared_map: SharedMap,
+    car_id: int,
+    pose_estimator: Optional[DrivePoseEstimator],
+) -> Pose:
+    pose_grid = shared_map.get_pose(car_id, frame="grid")
+    if pose_grid is not None:
+        return pose_grid
+
+    if pose_estimator is not None:
+        return pose_estimator.get_pose(frame="grid")
+
+    return integrate_dead_reckoning(
+        shared_map=shared_map,
+        car_id=car_id,
+        forward_step=0.0,
+        yaw_delta=0.0,
+    )
+
+
+def _propagate_pose(
+    *,
+    shared_map: SharedMap,
+    car_id: int,
+    pose_estimator: Optional[DrivePoseEstimator],
+    forward_step: float,
+    yaw_delta: float,
+) -> None:
+    if pose_estimator is None:
+        integrate_dead_reckoning(
+            shared_map=shared_map,
+            car_id=car_id,
+            forward_step=forward_step,
+            yaw_delta=yaw_delta,
+        )
+        return
+
+    pose_estimator.propagate_dead_reckoning(
+        forward_step=forward_step,
+        yaw_delta=yaw_delta,
+    )
+
+
+def _maybe_apply_visual_correction(
+    *,
+    pose_estimator: Optional[DrivePoseEstimator],
+    visual_frame_provider: Optional[Callable[[], Any]],
+    now_s: float,
+) -> None:
+    if pose_estimator is None or visual_frame_provider is None:
+        return
+
+    correction = pose_estimator.maybe_correct_from_obstacle_detection(
+        frame_provider=visual_frame_provider,
+        now_s=now_s,
+    )
+    if not correction.attempted:
+        return
+
+    print(
+        "visual_corr "
+        f"accepted={int(correction.accepted)} "
+        f"reason={correction.reason} "
+        f"pos_err={correction.position_error:.2f} "
+        f"head_err={correction.heading_error_deg:.1f} "
+        f"conf={correction.visual_confidence:.2f}"
+    )
+
+
+def _maybe_show_visual_debug_frame(
+    *,
+    pose_estimator: Optional[DrivePoseEstimator],
+) -> None:
+    if pose_estimator is None:
+        return
+
+    frame_getter = getattr(pose_estimator, "get_debug_keypoints_frame", None)
+    if not callable(frame_getter):
+        return
+
+    frame = frame_getter()
+    if frame is None:
+        return
+
+    cv2.imshow("SLAM debug", frame)
+    cv2.waitKey(1)
+
+
+def _log_drive_status(
+    *,
+    pose_grid: Pose,
+    waypoint_idx: int,
+    waypoint_total: int,
+    goal_xy_grid: tuple[int, int],
+    d_goal: float,
+    progress: float,
+    total_progress: float,
+    dist_cm: Optional[float],
+    path_len: int,
+    target_xy: tuple[float, float],
+    heading_error_deg: float,
+    commanded_steer_deg: float,
+    applied_steer_deg: float,
+    drive_mode: str,
+    speed: int,
+) -> None:
+    ultra_str = "None" if dist_cm is None else f"{round(dist_cm, 1)}cm"
+    print(
+        f"pose_g=({pose_grid.x:.1f},{pose_grid.y:.1f},{pose_grid.theta:.2f}) "
+        f"wp={waypoint_idx}/{waypoint_total} "
+        f"goal=({goal_xy_grid[0]},{goal_xy_grid[1]}) d={d_goal:.1f} "
+        f"prog={progress:.1f}/{total_progress:.1f} "
+        f"ultra={ultra_str} path_n={path_len} "
+        f"target=({target_xy[0]:.1f},{target_xy[1]:.1f}) "
+        f"head_err={heading_error_deg:.1f} "
+        f"cmd_steer={commanded_steer_deg:.1f} applied_steer={applied_steer_deg:.1f} "
+        f"mode={drive_mode} speed={speed}"
+    )
+
+
 def drive_path(
     path: Path,
     *,
@@ -172,9 +323,15 @@ def drive_path(
     loop_cfg: LoopConfig,
     car_id: int = 0,
     timeout_s: float = 180.0,
+    debug_show_grid: bool = False,
+    debug_show_visual: bool = False,
+    pose_estimator: Optional[DrivePoseEstimator] = None,
+    visual_frame_provider: Optional[Callable[[], Any]] = None,
 ) -> bool:
     if path is None or len(path.waypoints) < 2:
         raise ValueError("drive_path requires a Path with at least two waypoints")
+
+    total_progress = _path_length(path)
     best_progress = 0.0
 
     last_ultra_tick_t = 0.0
@@ -196,14 +353,11 @@ def drive_path(
                     car_id=car_id,
                 )
 
-            pose_grid = shared_map.get_pose(car_id, frame="grid")
-            if pose_grid is None:
-                pose_grid = integrate_dead_reckoning(
-                    shared_map=shared_map,
-                    car_id=car_id,
-                    forward_step=0.0,
-                    yaw_delta=0.0,
-                )
+            pose_grid = _current_pose_grid(
+                shared_map=shared_map,
+                car_id=car_id,
+                pose_estimator=pose_estimator,
+            )
 
             active_wp = path.waypoints[current_wp_idx]
             goal_xy_grid = (int(round(active_wp.x)), int(round(active_wp.y)))
@@ -221,11 +375,6 @@ def drive_path(
                 d_goal = math.hypot(goal_xy_grid[0] - pose_grid.x, goal_xy_grid[1] - pose_grid.y)
                 pivot_active = abs(_heading_error_to_point_deg(pose_grid, active_wp)) > float(loop_cfg.pivot_turn_heading_deg)
 
-            if current_wp_idx >= len(path.waypoints):
-                motor.stop()
-                motor.mark_reached()
-                return True
-
             active_wp = path.waypoints[current_wp_idx]
             tracking_path = _current_leg_path(path, current_wp_idx)
             target_x, target_y, heading_error_deg, steer_deg = follower.tracking_command(
@@ -235,17 +384,22 @@ def drive_path(
                 steer_cap_deg=follower.cfg.max_steer_deg,
             )
             motor.set_steering(steer_deg)
+
+            drive_mode = "track"
             drive_speed = int(motor.cfg.speed)
             odom_step_cells = 0.0
             odom_steer_deg = motor.get_applied_steering_deg()
 
             if latest_ultra_cm is not None and latest_ultra_cm <= float(loop_cfg.ultra_stop_cm):
                 motor.stop()
+                drive_mode = "paused_obstacle"
                 drive_speed = 0
                 time.sleep(float(loop_cfg.action_tick_s))
             else:
                 if pivot_active:
                     heading_error_deg = _heading_error_to_point_deg(pose_grid, active_wp)
+                    target_x = float(active_wp.x)
+                    target_y = float(active_wp.y)
                     if abs(float(heading_error_deg)) <= float(loop_cfg.pivot_turn_exit_deg):
                         pivot_active = False
                         follower.sync_to_motor_steering()
@@ -258,8 +412,10 @@ def drive_path(
                     )
                     pivot_duration_s = _pivot_reverse_duration_s(
                         loop_cfg=loop_cfg,
+                        drive_speed=drive_speed,
                         heading_error_deg=heading_error_deg,
                     )
+                    drive_mode = "pivot_turn_reverse"
                     motor.set_steering(-direction_sign * steer_abs)
                     extra_pivot_settle_s = max(
                         0.0,
@@ -271,6 +427,7 @@ def drive_path(
                     steer_deg = odom_steer_deg
                     yaw_delta = _pivot_reverse_yaw_delta_rad(
                         loop_cfg=loop_cfg,
+                        drive_speed=drive_speed,
                         heading_error_deg=heading_error_deg,
                         duration_s=pivot_duration_s,
                     )
@@ -293,12 +450,79 @@ def drive_path(
                         odom_step_cells,
                         odom_steer_deg,
                     )
-                integrate_dead_reckoning(
+                _propagate_pose(
                     shared_map=shared_map,
                     car_id=car_id,
+                    pose_estimator=pose_estimator,
                     forward_step=odom_step_cells,
                     yaw_delta=yaw_delta,
                 )
+                _maybe_apply_visual_correction(
+                    pose_estimator=pose_estimator,
+                    visual_frame_provider=visual_frame_provider,
+                    now_s=time.time(),
+                )
+
+            command = DriveCommand(
+                target_x=target_x,
+                target_y=target_y,
+                heading_error_deg=heading_error_deg,
+                commanded_steer_deg=steer_deg,
+                drive_mode=drive_mode,
+                speed=drive_speed,
+                odom_steer_deg=odom_steer_deg,
+            )
+
+            if debug_show_visual:
+                _maybe_show_visual_debug_frame(
+                    pose_estimator=pose_estimator,
+                )
+
+            _log_drive_status(
+                pose_grid=pose_grid,
+                waypoint_idx=current_wp_idx,
+                waypoint_total=max(1, len(path.waypoints) - 1),
+                goal_xy_grid=goal_xy_grid,
+                d_goal=d_goal,
+                progress=best_progress,
+                total_progress=total_progress,
+                dist_cm=latest_ultra_cm,
+                path_len=len(path.waypoints),
+                target_xy=(command.target_x, command.target_y),
+                heading_error_deg=command.heading_error_deg,
+                commanded_steer_deg=command.commanded_steer_deg,
+                applied_steer_deg=command.odom_steer_deg,
+                drive_mode=command.drive_mode,
+                speed=command.speed,
+            )
+
+            if debug_show_grid:
+                live_pose = shared_map.get_pose(car_id, frame="grid")
+                live_info = [
+                    (
+                        f"mode={command.drive_mode} d={d_goal:.2f} "
+                        f"head_err={command.heading_error_deg:.1f} "
+                        f"cmd={command.commanded_steer_deg:.1f} app={command.odom_steer_deg:.1f}"
+                    ),
+                    (
+                        f"ultra={'None' if latest_ultra_cm is None else f'{latest_ultra_cm:.1f}cm'} "
+                        f"path_n={len(path.waypoints)} speed={command.speed}"
+                    ),
+                ]
+                if live_pose is not None:
+                    live_info.append(
+                        f"pose=({live_pose.x:.2f},{live_pose.y:.2f},{live_pose.theta:.2f})"
+                    )
+                frame = shared_map.render_grid_debug_view(
+                    car_id=car_id,
+                    path=path,
+                    target=active_wp,
+                    control_target=TargetPoint(command.target_x, command.target_y),
+                    cell_px=14,
+                    info_lines=live_info,
+                )
+                cv2.imshow("Planning debug", frame)
+                cv2.waitKey(1)
     finally:
         motor.stop()
 

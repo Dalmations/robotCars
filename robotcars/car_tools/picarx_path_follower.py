@@ -1,9 +1,11 @@
-# car_tools/picarx_path_follower.py
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional, Tuple, List
+from typing import TYPE_CHECKING, Optional, Tuple
+
+from model import Path, Pose
+from coordination.shared_map import SharedMap
 import time
 
 from model import Path, Pose
@@ -13,6 +15,66 @@ from coordination.shared_map import SharedMap
 
 
 TickCallback = Callable[[float, float, float], None]  # x, y, yaw (grid units, radians) Callback for PurePursuit
+if TYPE_CHECKING:
+    from car_tools.motor_controller import MotorController
+
+
+def wrap_angle(a: float) -> float:
+    while a > math.pi:
+        a -= 2.0 * math.pi
+    while a < -math.pi:
+        a += 2.0 * math.pi
+    return a
+
+
+def integrate_pose(
+    pose: Pose,
+    *,
+    forward_step: float,
+    yaw_delta: float,
+) -> Pose:
+    step = float(forward_step)
+    dtheta = float(yaw_delta)
+    theta_mid = float(pose.theta) + 0.5 * dtheta
+    return Pose(
+        x=float(pose.x + step * math.cos(theta_mid)),
+        y=float(pose.y + step * math.sin(theta_mid)),
+        theta=float(wrap_angle(float(pose.theta) + dtheta)),
+    )
+
+
+def estimate_step_cells_for_duration(
+    duration_s: float,
+    *,
+    action_tick_s: float,
+    speed: int,
+    speed_ref: int,
+) -> float:
+    tick_count = float(duration_s) / float(max(1e-6, action_tick_s))
+    ref_step = tick_count / 5.0
+    speed_ref = max(1.0, float(speed_ref))
+    speed_cmd = float(max(0, min(100, int(speed))))
+    return ref_step * (speed_cmd / speed_ref)
+
+
+def integrate_dead_reckoning(
+    *,
+    shared_map: SharedMap,
+    car_id: int,
+    forward_step: float,
+    yaw_delta: float,
+) -> Pose:
+    pose_world = shared_map.get_pose(car_id, frame="world")
+    if pose_world is None:
+        pose_world = Pose(0.0, 0.0, 0.0)
+
+    next_pose = integrate_pose(
+        pose_world,
+        forward_step=forward_step,
+        yaw_delta=yaw_delta,
+    )
+    shared_map.set_pose(car_id, next_pose)
+    return next_pose
 
 @dataclass
 class FollowerConfig:

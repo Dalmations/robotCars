@@ -1,14 +1,10 @@
-# movement.py
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Iterable, Optional, Tuple
-
-import numpy as np
+import math
+from typing import Iterable, Iterable, Tuple
 import math
 
 from model import Path, TargetPoint
-from coordination.shared_map import SharedMap
-from virtualworld import astar
+
 
 GridPoint = Tuple[int, int]
 

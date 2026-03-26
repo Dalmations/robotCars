@@ -42,13 +42,6 @@ class Obstacle:
         )
 
 
-class Observations:
-    def __init__(self, obstacles: Optional[List[Obstacle]] = None):
-        self.obstacles = obstacles if obstacles is not None else []
-
-    def __repr__(self) -> str:
-        return f"Observations(n_obstacles={len(self.obstacles)})"
-
 
 class Path:
     def __init__(self, waypoints: List[TargetPoint]):
