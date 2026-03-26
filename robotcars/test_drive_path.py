@@ -37,6 +37,7 @@ class DriveCommand:
     target_x: float
     target_y: float
     heading_error_deg: float
+    commanded_steer_deg: float
     drive_mode: str
     speed: int
     odom_steer_deg: float = 0.0
@@ -262,6 +263,25 @@ def _maybe_apply_visual_correction(
     )
 
 
+def _maybe_show_visual_debug_frame(
+    *,
+    pose_estimator: Optional[DrivePoseEstimator],
+) -> None:
+    if pose_estimator is None:
+        return
+
+    frame_getter = getattr(pose_estimator, "get_debug_keypoints_frame", None)
+    if not callable(frame_getter):
+        return
+
+    frame = frame_getter()
+    if frame is None:
+        return
+
+    cv2.imshow("SLAM debug", frame)
+    cv2.waitKey(1)
+
+
 def _log_drive_status(
     *,
     pose_grid: Pose,
@@ -275,7 +295,8 @@ def _log_drive_status(
     path_len: int,
     target_xy: tuple[float, float],
     heading_error_deg: float,
-    steer_deg: float,
+    commanded_steer_deg: float,
+    applied_steer_deg: float,
     drive_mode: str,
     speed: int,
 ) -> None:
@@ -287,7 +308,8 @@ def _log_drive_status(
         f"prog={progress:.1f}/{total_progress:.1f} "
         f"ultra={ultra_str} path_n={path_len} "
         f"target=({target_xy[0]:.1f},{target_xy[1]:.1f}) "
-        f"head_err={heading_error_deg:.1f} steer={steer_deg:.1f} "
+        f"head_err={heading_error_deg:.1f} "
+        f"cmd_steer={commanded_steer_deg:.1f} applied_steer={applied_steer_deg:.1f} "
         f"mode={drive_mode} speed={speed}"
     )
 
@@ -302,6 +324,7 @@ def drive_path(
     car_id: int = 0,
     timeout_s: float = 180.0,
     debug_show_grid: bool = False,
+    debug_show_visual: bool = False,
     pose_estimator: Optional[DrivePoseEstimator] = None,
     visual_frame_provider: Optional[Callable[[], Any]] = None,
 ) -> bool:
@@ -444,10 +467,16 @@ def drive_path(
                 target_x=target_x,
                 target_y=target_y,
                 heading_error_deg=heading_error_deg,
+                commanded_steer_deg=steer_deg,
                 drive_mode=drive_mode,
                 speed=drive_speed,
                 odom_steer_deg=odom_steer_deg,
             )
+
+            if debug_show_visual:
+                _maybe_show_visual_debug_frame(
+                    pose_estimator=pose_estimator,
+                )
 
             _log_drive_status(
                 pose_grid=pose_grid,
@@ -461,7 +490,8 @@ def drive_path(
                 path_len=len(path.waypoints),
                 target_xy=(command.target_x, command.target_y),
                 heading_error_deg=command.heading_error_deg,
-                steer_deg=command.odom_steer_deg,
+                commanded_steer_deg=command.commanded_steer_deg,
+                applied_steer_deg=command.odom_steer_deg,
                 drive_mode=command.drive_mode,
                 speed=command.speed,
             )
@@ -471,7 +501,8 @@ def drive_path(
                 live_info = [
                     (
                         f"mode={command.drive_mode} d={d_goal:.2f} "
-                        f"head_err={command.heading_error_deg:.1f} steer={command.odom_steer_deg:.1f}"
+                        f"head_err={command.heading_error_deg:.1f} "
+                        f"cmd={command.commanded_steer_deg:.1f} app={command.odom_steer_deg:.1f}"
                     ),
                     (
                         f"ultra={'None' if latest_ultra_cm is None else f'{latest_ultra_cm:.1f}cm'} "

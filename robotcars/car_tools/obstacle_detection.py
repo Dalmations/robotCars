@@ -1375,6 +1375,16 @@ class ConservativePoseEstimator:
             visual_confidence=float(self._last_result.visual_confidence),
         )
 
+    def get_debug_keypoints_frame(self) -> Optional[np.ndarray]:
+        if self.visual_localizer is None:
+            return None
+        return self.visual_localizer.get_debug_keypoints_frame()
+
+    def get_debug_matches_frame(self) -> Optional[np.ndarray]:
+        if self.visual_localizer is None:
+            return None
+        return self.visual_localizer.get_debug_matches_frame()
+
     def propagate_dead_reckoning(self, *, forward_step: float, yaw_delta: float) -> Pose:
         pose_world = self.get_pose(frame="world")
         next_pose = integrate_pose(

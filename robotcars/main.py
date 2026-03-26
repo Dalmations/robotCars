@@ -36,6 +36,10 @@ def build_shared_map() -> SharedMap:
 
 def build_motor() -> MotorController:
     return MotorController(MotorConfig(
+        max_steer_deg=35.0,                        # hardware steering clamp
+        steer_gain=1.0,                           # steering gain calibration
+        steer_sign=1.0,                           # flip to -1.0 if left/right are mirrored
+        steer_offset_deg=0.0,                     # trim so commanded 0 drives straight
         speed=26,                                 # default drive speed
         settle_seconds=0.01,                      # servo settle pause
     ))
@@ -106,7 +110,7 @@ def build_visual_test_stack(
         shared_map,
         car_id=car_id,
         cfg=VslamConfig(
-            debug_draw_keypoints=False,
+            debug_draw_keypoints=True,
             debug_draw_matches=False,
             publish_pose_to_shared_map=False,
             pose_ema_alpha=0.15,
@@ -153,6 +157,7 @@ def main() -> None:
             loop_cfg=loop_cfg,
             timeout_s=180.0,
             debug_show_grid=True,
+            debug_show_visual=pose_estimator is not None,
             pose_estimator=pose_estimator,
             visual_frame_provider=visual_frame_provider,
         )
