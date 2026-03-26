@@ -6,7 +6,8 @@ SHAPES = {
         "all points equally distant from the center",
         "no edges or vertices",
         "circle",
-        'drive in a cirlce'
+        'drive in a cirlce',
+        'drive in a circular motion'
     ],
     "triangle": [
         "a shape with three sides",
@@ -17,7 +18,7 @@ SHAPES = {
         "triangle"
     ],
     "square": [
-        
+        'square'
     ],
     "rectangle": [
         "a shape with four right angles",

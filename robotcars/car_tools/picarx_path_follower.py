@@ -73,7 +73,7 @@ class PurePursuitFollower:
     For real accuracy, later we will replace pose updates with camera/odometry.
     """
 
-    def __init__(self, motor: MotorController, cfg: Optional[FollowerConfig] = None, params: dict):
+    def __init__(self, motor: MotorController, cfg: Optional[FollowerConfig] = None, params: dict={}):
         self.motor = motor
         self.cfg = cfg or FollowerConfig()
         self.params = params
@@ -158,7 +158,8 @@ class PurePursuitFollower:
             return (distance - self.cfg.stop_dist) / (self.cfg.safe_dist - self.cfg.stop_dist)
     
     def update_params(self, shape):
-        self.cfg.wheelbase = self.params[shape]['wheelbase']
+        if shape in self.params:
+            self.cfg.wheelbase = self.params[shape]['wheelbase']
 
     # -------------------------
     # Pure Pursuit math

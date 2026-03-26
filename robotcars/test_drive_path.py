@@ -82,7 +82,7 @@ def _pivot_reverse_duration_s(
 ) -> float:
     remaining_error_deg = max(
         0.0,
-        abs(float(heading_error_deg)) - float(loop_cfg.pivot_turn_exit_deg),
+        abs(float(heading_error_deg)) - float(follower.cfg.pivot_turn_exit_deg),
     )
     if remaining_error_deg <= 1e-6:
         return 0.0
@@ -108,7 +108,7 @@ def _pivot_reverse_yaw_delta_rad(
     ref_speed = max(1.0, float(loop_cfg.pivot_turn_ref_speed))
     yaw_deg_per_s = float(loop_cfg.pivot_turn_deg_per_s) * (float(drive_speed) / ref_speed)
     yaw_deg = min(
-        max(0.0, abs(float(heading_error_deg)) - float(loop_cfg.pivot_turn_exit_deg)),
+        max(0.0, abs(float(heading_error_deg)) - float(follower.cfg.pivot_turn_exit_deg)),
         yaw_deg_per_s * float(duration_s),
     )
     direction_sign = 1.0 if float(heading_error_deg) >= 0.0 else -1.0
@@ -117,11 +117,11 @@ def _pivot_reverse_yaw_delta_rad(
 
 def _pivot_reverse_step_cells(
     *,
-    loop_cfg: LoopConfig,
+    follower: PathFollower,
     yaw_delta_rad: float,
 ) -> float:
     yaw_deg = abs(math.degrees(float(yaw_delta_rad)))
-    return -yaw_deg * max(0.0, float(loop_cfg.pivot_turn_cells_per_deg))
+    return -yaw_deg * max(0.0, float(follower.cfg.pivot_turn_cells_per_deg))
 
 
 def _path_length(path: Path) -> float:
@@ -373,7 +373,7 @@ def drive_path(
                 active_wp = path.waypoints[current_wp_idx]
                 goal_xy_grid = (int(round(active_wp.x)), int(round(active_wp.y)))
                 d_goal = math.hypot(goal_xy_grid[0] - pose_grid.x, goal_xy_grid[1] - pose_grid.y)
-                pivot_active = abs(_heading_error_to_point_deg(pose_grid, active_wp)) > float(loop_cfg.pivot_turn_heading_deg)
+                pivot_active = abs(_heading_error_to_point_deg(pose_grid, active_wp)) > float(follower.cfg.pivot_turn_heading_deg)
 
             active_wp = path.waypoints[current_wp_idx]
             tracking_path = _current_leg_path(path, current_wp_idx)
@@ -407,7 +407,7 @@ def drive_path(
                 if pivot_active:
                     direction_sign = 1.0 if float(heading_error_deg) >= 0.0 else -1.0
                     steer_abs = min(
-                        abs(float(loop_cfg.pivot_turn_steer_deg)),
+                        abs(float(follower.cfg.pivot_turn_steer_deg)),
                         float(follower.cfg.max_steer_deg),
                     )
                     pivot_duration_s = _pivot_reverse_duration_s(
@@ -419,7 +419,7 @@ def drive_path(
                     motor.set_steering(-direction_sign * steer_abs)
                     extra_pivot_settle_s = max(
                         0.0,
-                        float(loop_cfg.pivot_turn_settle_s) - float(getattr(motor.cfg, "settle_seconds", 0.0)),
+                        float(follower.cfg.pivot_turn_settle_s) - float(getattr(motor.cfg, "settle_seconds", 0.0)),
                     )
                     if extra_pivot_settle_s > 1e-6:
                         time.sleep(extra_pivot_settle_s)
@@ -432,7 +432,7 @@ def drive_path(
                         duration_s=pivot_duration_s,
                     )
                     odom_step_cells = _pivot_reverse_step_cells(
-                        loop_cfg=loop_cfg,
+                        follower=follower,
                         yaw_delta_rad=yaw_delta,
                     )
                     motor.backward_for(pivot_duration_s, speed=drive_speed)

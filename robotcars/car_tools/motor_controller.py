@@ -10,11 +10,6 @@ from picarx import Picarx  # SunFounder PiCar-X library
 
 @dataclass
 class MotorConfig:
-    max_steer_deg: float = 35.0
-    steer_gain: float = 1.0
-    steer_sign: float = 1.0
-    steer_offset_deg: float = 0.0
-
     # Motion
     speed: int = 50                    # default drive speed
 
@@ -46,11 +41,9 @@ class MotorController:
     def set_steering(self, angle_deg: float) -> None:
         """
         angle_deg is the desired steering angle in degrees from controller.
-        This function applies calibration and sends the steering command to the servo.
+        This function sends the steering command to the servo.
         """
-        desired = float(angle_deg)
-        cmd = self.cfg.steer_sign * (desired * self.cfg.steer_gain) + float(self.cfg.steer_offset_deg)
-        cmd = max(-float(self.cfg.max_steer_deg), min(float(self.cfg.max_steer_deg), cmd))
+        cmd = float(angle_deg)
         self.px.set_dir_servo_angle(cmd)
         self._applied_steer_deg = cmd
         if self.cfg.settle_seconds > 0:  # Brief servo settle pause
@@ -80,6 +73,9 @@ class MotorController:
 
     def mark_reached(self) -> None:
         self._reached_target = True
+
+    def at_target(self) -> bool:
+        return self._reached_target
 
     def get_applied_steering_deg(self) -> float:
         return float(self._applied_steer_deg)
