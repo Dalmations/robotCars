@@ -52,7 +52,6 @@ class DrivePoseEstimator(Protocol):
         *,
         frame_provider: Optional[Callable[[], Any]] = None,
         now_s: Optional[float] = None,
-        force: bool = False,
     ) -> Any: ...
 
 

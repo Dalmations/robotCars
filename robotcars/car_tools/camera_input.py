@@ -58,7 +58,13 @@ class PiCarXCamera:
             except Exception:
                 pass
 
-            self._wait_for_first_frame()
+            if not self._wait_for_first_frame():
+                try:
+                    Vilib.camera_close()
+                except Exception:
+                    pass
+                self._started = False
+                return
             try:
                 Vilib.display(local=self.cfg.display_local, web=self.cfg.display_web)
             except Exception:
@@ -67,7 +73,7 @@ class PiCarXCamera:
         except Exception:
             self._started = False
 
-    def _wait_for_first_frame(self) -> None:
+    def _wait_for_first_frame(self) -> bool:
         t0 = time.time()
         while True:
             img = getattr(Vilib, "img", None)
@@ -76,10 +82,10 @@ class PiCarXCamera:
                     Vilib.flask_img = img
                 except Exception:
                     pass
-                return
+                return True
 
             if time.time() - t0 > self.cfg.startup_wait_seconds:
-                return
+                return False
             time.sleep(0.05)
 
     def stop(self) -> None:
@@ -130,7 +136,7 @@ class OpenCvFrameProvider:
     """
     Small OpenCV-backed frame source for test-drive builds.
 
-    Returns BGR frames, or None when the camera is unavailable.
+    Returns RGB frames, or None when the camera is unavailable.
     This remains as a fallback for non-Pi environments where Vilib is missing.
     """
 
@@ -172,6 +178,11 @@ class OpenCvFrameProvider:
         ok, frame = self._cap.read()
         if not ok or frame is None:
             return None
+        if frame.ndim == 3:
+            if frame.shape[2] == 3:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            elif frame.shape[2] == 4:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
         return frame
 
     def frame_size(self) -> tuple[int, int]:

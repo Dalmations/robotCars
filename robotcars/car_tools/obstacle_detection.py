@@ -283,9 +283,6 @@ class MonocularVSLAM:
     def get_debug_keypoints_frame(self) -> Optional[np.ndarray]:
         return None if self._dbg_keypoints_bgr is None else self._dbg_keypoints_bgr.copy()
 
-    def get_debug_matches_frame(self) -> Optional[np.ndarray]:
-        return None if self._dbg_matches_bgr is None else self._dbg_matches_bgr.copy()
-
     def get_status(self) -> VslamStatus:
         s = self._status
         raw_pose = self._raw_pose_latest
@@ -1380,11 +1377,6 @@ class ConservativePoseEstimator:
             return None
         return self.visual_localizer.get_debug_keypoints_frame()
 
-    def get_debug_matches_frame(self) -> Optional[np.ndarray]:
-        if self.visual_localizer is None:
-            return None
-        return self.visual_localizer.get_debug_matches_frame()
-
     def propagate_dead_reckoning(self, *, forward_step: float, yaw_delta: float) -> Pose:
         pose_world = self.get_pose(frame="world")
         next_pose = integrate_pose(
@@ -1399,11 +1391,9 @@ class ConservativePoseEstimator:
         self._cycles_since_correction += 1
         return next_pose
 
-    def should_run_obstacle_detection(self, *, now_s: Optional[float] = None, force: bool = False) -> bool:
+    def should_run_obstacle_detection(self, *, now_s: Optional[float] = None) -> bool:
         if self.visual_localizer is None:
             return False
-        if force:
-            return True
         if self._cycles_since_correction < max(1, int(self.cfg.min_cycles_between_corrections)):
             return False
 
@@ -1424,7 +1414,6 @@ class ConservativePoseEstimator:
         *,
         frame_provider: Optional[Callable[[], Optional[np.ndarray]]] = None,
         now_s: Optional[float] = None,
-        force: bool = False,
     ) -> ConservativeCorrectionResult:
         dead_reckoning_pose = self.get_pose(frame="world")
 
@@ -1438,7 +1427,7 @@ class ConservativePoseEstimator:
             )
             return self.get_last_result()
 
-        if not self.should_run_obstacle_detection(now_s=now_s, force=force):
+        if not self.should_run_obstacle_detection(now_s=now_s):
             self._last_result = ConservativeCorrectionResult(
                 attempted=False,
                 accepted=False,

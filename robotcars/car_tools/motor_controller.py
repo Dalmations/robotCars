@@ -81,8 +81,5 @@ class MotorController:
     def mark_reached(self) -> None:
         self._reached_target = True
 
-    def at_target(self) -> bool:
-        return self._reached_target
-
     def get_applied_steering_deg(self) -> float:
         return float(self._applied_steer_deg)
