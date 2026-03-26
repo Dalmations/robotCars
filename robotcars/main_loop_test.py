@@ -35,19 +35,19 @@ class FollowerClient(MQTTClient):
 
 IDENTITY = os.uname().nodename
 PARAMS = {
-    'strawberry': {
+    'lugnut': {
         'circle': {
             'wheelbase':2.0,
             'pivot_turn_heading_deg': 90.0
         }
     },
-    'blueberry': {
+    'pongo': {
         'circle': {
             'wheelbase':2.5,
             'pivot_turn_heading_deg': 90.0
         }
     },
-    'raspberry': {
+    'lucky': {
         'circle': {
             'wheelbase':2.5,
             'pivot_turn_heading_deg': 90.0
@@ -129,7 +129,7 @@ def leader_main():
         finally:
             motor.stop()
 
-if IDENTITY=='strawberry':
+if IDENTITY=='lugnut':
     leader_main()
 else:
     follower_main()
