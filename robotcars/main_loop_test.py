@@ -54,10 +54,7 @@ PARAMS = {
     }
 }
 
-def follower_main():
-    fc = FollowerClient(IDENTITY, "10.229.180.83")
-    fc.start() 
-    motor = MotorController(MotorConfig(speed=80))
+def build_follower(motor: MotorController) -> PurePursuitFollower:
     follower = PurePursuitFollower(motor, FollowerConfig(
         lookahead=5.0,                            # pure pursuit lookahead distance
         wheelbase=1.0,                           # front to back wheel wheelbase
@@ -69,6 +66,13 @@ def follower_main():
         dock_distance_grid=8.0,                   # near goal threshold
         dock_min_lookahead_grid=1.5,              # minimum dock lookahead
     ), PARAMS[IDENTITY])
+    return follower
+
+def follower_main():
+    fc = FollowerClient(IDENTITY, "10.229.180.83")
+    fc.start() 
+    motor = MotorController(MotorConfig(speed=80))
+    follower = build_follower(motor)
     shared_map = build_shared_map()
     loop_cfg = build_loop_config()
     while True:
@@ -95,17 +99,7 @@ def leader_main():
     fc = FollowerClient(IDENTITY, 'localhost')
     fc.start()
     motor = MotorController(MotorConfig(speed=80))
-    follower = PurePursuitFollower(motor, FollowerConfig(
-        lookahead=5.0,                            # pure pursuit lookahead distance
-        wheelbase=1.0,                           # front to back wheel wheelbase
-        goal_tolerance=0.6,                       # goal reached radius
-        steer_sign=1.0,                           # follower steering sign
-        steer_alpha=0.25,                         # steering smoother
-        steer_deadband_deg=2.0,                   # ignore tiny steer changes
-        steer_rate_limit_deg_per_tick=12.0,       # max steer change
-        dock_distance_grid=8.0,                   # near goal threshold
-        dock_min_lookahead_grid=1.5,              # minimum dock lookahead
-    ), PARAMS[IDENTITY])
+    follower = build_follower(motor)
     vosk = Vosk(language="en-us")
     shared_map = build_shared_map()
     loop_cfg = build_loop_config()

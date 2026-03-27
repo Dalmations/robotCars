@@ -5,7 +5,10 @@ class Pose:
     def __init__(self, x: float, y: float, theta: float):
         self.x = float(x)
         self.y = float(y)
-        self.theta = float(theta)
+        self.theta = float(theta) # radians
+
+    def copy(self) -> "Pose":
+        return Pose(self.x, self.y, self.theta)
 
     def __repr__(self) -> str:
         return f"Pose(x={self.x:.2f}, y={self.y:.2f}, theta={self.theta:.2f})"

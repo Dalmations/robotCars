@@ -7,8 +7,6 @@ from typing import TYPE_CHECKING, Optional, Tuple
 from model import Path, Pose
 from coordination.shared_map import SharedMap
 import time
-
-from model import Path, Pose
 from car_tools.motor_controller import MotorController
 from typing import Callable, Optional
 from coordination.shared_map import SharedMap
@@ -52,18 +50,6 @@ class FollowerConfig:
     dock_min_lookahead_grid: float = 6.0       # minimum dock lookahead
 
 
-class Pose2D:
-    __slots__ = ("x", "y", "yaw")
-
-    def __init__(self, x: float, y: float, yaw: float):
-        self.x = float(x)
-        self.y = float(y)
-        self.yaw = float(yaw)  # radians
-
-    def copy(self) -> "Pose2D":
-        return Pose2D(self.x, self.y, self.yaw)
-
-
 class PurePursuitFollower:
     """
     Matlab-style Pure Pursuit in grid coordinates.
@@ -81,9 +67,9 @@ class PurePursuitFollower:
         self.shape = None
         
 
-    # def follow(self, path: Path, start_pose: Optional[Pose2D] = None) -> None:
+    # def follow(self, path: Path, start_pose: Optional[Pose] = None) -> None:
     # Use for circle
-    def follow(self, path: Path, start_pose: Optional[Pose2D] = None, on_tick: Optional[TickCallback] = None) -> None:
+    def follow(self, path: Path, start_pose: Optional[Pose] = None, on_tick: Optional[TickCallback] = None) -> None:
         wps = path.waypoints
         if len(wps) < 2:
             return
@@ -97,7 +83,7 @@ class PurePursuitFollower:
             x0, y0 = pts[0]
             x1, y1 = pts[1]
             yaw0 = math.atan2(y1 - y0, x1 - x0)
-            pose = Pose2D(x0, y0, yaw0)
+            pose = Pose(x0, y0, yaw0)
         else:
             pose = start_pose.copy()
 
@@ -135,7 +121,6 @@ class PurePursuitFollower:
 
                     # Dead-reckoning pose update (grid bicycle model)
                     pose = self._update_pose(pose, steer_deg, scaled_speed/12.9, self.cfg.wheelbase, self.cfg.dt)
-                    # pose = Pose2D(target[0],target[1],pose.yaw)
                 else:
                     time.sleep(self.cfg.dt)
 
@@ -167,7 +152,7 @@ class PurePursuitFollower:
     # -------------------------
     # Pure Pursuit math
     # -------------------------
-    def _pure_pursuit_steer_deg(self, pose: Pose2D, target: Tuple[float, float]) -> float:
+    def _pure_pursuit_steer_deg(self, pose: Pose, target: Tuple[float, float]) -> float:
         """
         Pure Pursuit steering:
           alpha = angle between heading and target direction
@@ -189,7 +174,7 @@ class PurePursuitFollower:
 
     def _lookahead_point(
         self,
-        pose: Pose2D,
+        pose: Pose,
         pts: List[Tuple[float, float]],
         lookahead: float,
     ) -> Tuple[float, float]:
@@ -203,7 +188,7 @@ class PurePursuitFollower:
                 return (x, y)
         return pts[-1]
 
-    def _update_pose(self, pose: Pose2D, steer_deg: float, v: float, L: float, dt: float) -> Pose2D:
+    def _update_pose(self, pose: Pose, steer_deg: float, v: float, L: float, dt: float) -> Pose:
         """
         Bicycle model update in grid units:
           x += v cos(yaw) dt
@@ -214,15 +199,11 @@ class PurePursuitFollower:
         x = pose.x + v * math.cos(pose.yaw) * dt
         y = pose.y + v * math.sin(pose.yaw) * dt
         yaw = pose.yaw + (v / max(1e-6, L)) * math.tan(delta) * dt
-        return Pose2D(x, y, self._wrap_angle(yaw))
+        return Pose(x, y, self._wrap_angle(yaw))
 
     @staticmethod
     def _dist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
         return math.hypot(a[0] - b[0], a[1] - b[1])
-    
-    @staticmethod
-    def _dist(x0: float, y0: float, x1: float, y1: float) -> float:
-        return float(math.hypot(x1 - x0, y1 - y0))
 
     @staticmethod
     def _wrap_angle(a: float) -> float:
@@ -304,7 +285,7 @@ class PurePursuitFollower:
         path_angle = math.atan2(target_y - pose.y, target_x - pose.x)
         alpha = self._wrap_angle(path_angle - pose.theta)
 
-        lookahead_distance = max(1e-6, self._dist(pose.x, pose.y, target_x, target_y))
+        lookahead_distance = math.hypot(target_x - pose.x, target_y - pose.y)
         wheelbase = max(1e-6, float(self.cfg.wheelbase))  # Use model wheelbase
 
         return math.atan2(2.0 * wheelbase * math.sin(alpha), lookahead_distance)

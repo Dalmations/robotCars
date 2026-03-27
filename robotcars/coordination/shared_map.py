@@ -25,16 +25,6 @@ FrameName = Literal["world", "grid"]
 
 
 @dataclass
-class GridConfig:
-    """
-    Mapping between continuous SLAM/world coordinates and discrete planning grid cells.
-    """
-    size: Tuple[int, int] = (50, 50)
-    resolution: float = 1.0
-    origin_world: Tuple[float, float] = (0.0, 0.0)
-
-
-@dataclass
 class SharedMap:
     """
     Shared state for planning and localization.
@@ -44,7 +34,7 @@ class SharedMap:
     - `map_points` are sparse SLAM points stored as world-space tuples.
     """
     obstacles: Dict[str, Obstacle] = field(default_factory=dict)
-    pose: Pose
+    pose: Optional[Pose] = None
     map_points: List[Tuple[float, float, float]] = field(default_factory=list)
 
     _static_grid: Optional[np.ndarray] = None
@@ -122,10 +112,9 @@ class SharedMap:
         return x, y
 
     def get_car_grid_position(self) -> GridPoint:
-        pose = self.poses.get()
-        if pose is None:
+        if self.pose is None:
             return (0, 0)
-        return self.world_to_grid(pose.x, pose.y)
+        return self.world_to_grid(self.pose.x, self.pose.y)
 
     # ---------------- Occupancy ----------------
 
@@ -200,7 +189,6 @@ class SharedMap:
             x=ox,
             y=oy,
             radius=float(r_world),
-            is_moving=False,
         )
         return True
 

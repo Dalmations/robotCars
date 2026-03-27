@@ -58,7 +58,6 @@ class DrivePoseEstimator(Protocol):
         self,
         frame_rgb_or_bgr: Optional[Any] = None,
         *,
-        frame_provider: Optional[Callable[[], Any]] = None,
         now_s: Optional[float] = None,
     ) -> Any: ...
 
@@ -249,7 +248,7 @@ def _maybe_apply_visual_correction(
     visual_frame_provider: Optional[Callable[[], Any]],
     now_s: float,
 ) -> None:
-    if pose_estimator is None or visual_frame_provider is None:
+    if pose_estimator is None:
         return
 
     correction = pose_estimator.maybe_correct_from_obstacle_detection(
@@ -263,29 +262,9 @@ def _maybe_apply_visual_correction(
         "visual_corr "
         f"accepted={int(correction.accepted)} "
         f"reason={correction.reason} "
-        f"pos_err={correction.position_error:.2f} "
         f"head_err={correction.heading_error_deg:.1f} "
         f"conf={correction.visual_confidence:.2f}"
     )
-
-
-def _maybe_show_visual_debug_frame(
-    *,
-    pose_estimator: Optional[DrivePoseEstimator],
-) -> None:
-    if pose_estimator is None:
-        return
-
-    frame_getter = getattr(pose_estimator, "get_debug_keypoints_frame", None)
-    if not callable(frame_getter):
-        return
-
-    frame = frame_getter()
-    if frame is None:
-        return
-
-    cv2.imshow("SLAM debug", frame)
-    cv2.waitKey(1)
 
 
 def _log_drive_status(
@@ -321,7 +300,7 @@ def _log_drive_status(
 
 def build_visual_test_stack(
     shared_map: SharedMap,
-) -> tuple[Optional[ConservativePoseEstimator], Optional[Callable[[], object]], Optional[Callable[[], None]]]:
+) -> tuple[Optional[ConservativePoseEstimator], Optional[PiCarXCamera]]:
     frame_provider = PiCarXCamera(CameraConfig(
         display_local=False,
         display_web=False,
@@ -329,11 +308,8 @@ def build_visual_test_stack(
         frame_rate=30,
     ))
     frame_provider.start()
-    if not frame_provider.is_opened():
-        frame_provider.release()
-        return None, None
 
-    frame_w, frame_h = frame_provider.frame_size()
+    frame_w, frame_h = frame_provider.cfg.frame_size
     focal_px = 0.9 * max(frame_w, frame_h)
     intrinsics = CameraIntrinsics(
         fx=float(focal_px),
@@ -344,11 +320,7 @@ def build_visual_test_stack(
 
     visual_localizer = MonocularVSLAM(
         intrinsics,
-        shared_map,
         cfg=VslamConfig(
-            debug_draw_keypoints=True,
-            debug_draw_matches=False,
-            publish_pose_to_shared_map=False,
             pose_ema_alpha=0.15,
         ),
     )
@@ -360,13 +332,12 @@ def build_visual_test_stack(
             min_seconds_between_corrections=0.75,
             min_translation_between_corrections=1.0,
             min_heading_change_between_corrections_deg=10.0,
-            position_agreement_threshold=0.8,
             heading_agreement_threshold_deg=10.0,
             correction_alpha=0.2,
             min_visual_confidence=0.6,
         ),
     )
-    return pose_estimator, frame_provider.get_frame, frame_provider.release
+    return pose_estimator, frame_provider
 
 def drive_path(
     path: Path,
@@ -380,7 +351,7 @@ def drive_path(
     if path is None or len(path.waypoints) < 2:
         raise ValueError("drive_path requires a Path with at least two waypoints")
     
-    pose_estimator, visual_frame_provider, close_frame_provider = build_visual_test_stack(shared_map)
+    pose_estimator, frame_provider = build_visual_test_stack(shared_map)
 
     total_progress = _path_length(path)
     best_progress = 0.0
@@ -511,7 +482,7 @@ def drive_path(
                 )
                 _maybe_apply_visual_correction(
                     pose_estimator=pose_estimator,
-                    visual_frame_provider=visual_frame_provider,
+                    visual_frame_provider=None if frame_provider is None else frame_provider.read,
                     now_s=time.time(),
                 )
 
@@ -543,11 +514,6 @@ def drive_path(
                 speed=command.speed,
             )
 
-            # Debug keypoint frames
-            _maybe_show_visual_debug_frame(
-                pose_estimator=pose_estimator,
-            )
-
             # Debug grid
             live_pose = shared_map.get_pose(frame="grid")
             live_info = [
@@ -575,8 +541,7 @@ def drive_path(
             cv2.imshow("Planning debug", frame)
             cv2.waitKey(1)
     finally:
-        if close_frame_provider is not None:
-            close_frame_provider()
+        frame_provider.stop()
         motor.stop()
     return False
 

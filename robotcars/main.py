@@ -40,7 +40,7 @@ def build_loop_config() -> LoopConfig:
 
 
 def build_route(shared_map: SharedMap) -> list[tuple[int, int]]:
-    start_grid = shared_map.get_car_grid_position(0)
+    start_grid = shared_map.get_car_grid_position()
     route = build_square_route(start_grid, side_cells=6)
     return [
         *route,

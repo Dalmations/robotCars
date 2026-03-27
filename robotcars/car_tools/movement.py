@@ -17,11 +17,11 @@ def plan_formation(shared_map: SharedMap, shape : str) -> Path:
             route = generate_circle_points(shared_map.grid.size, num_points=20)
             return route_to_path(route)
         case 'square':
-            start_grid = shared_map.get_car_grid_position(0)
+            start_grid = shared_map.get_car_grid_position()
             route = build_square_route(start_grid, side_cells=6)
             return route_to_path(route)
         case 'hexagon':
-            start_grid = shared_map.get_car_grid_position(0)
+            start_grid = shared_map.get_car_grid_position()
             route = build_hexagon_route(start_grid, side_cells=6)
             return route_to_path(route)
         case _:
