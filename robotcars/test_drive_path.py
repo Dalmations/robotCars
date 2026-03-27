@@ -14,6 +14,15 @@ from car_tools.motor_controller import MotorController
 from car_tools.picarx_path_follower import (
     PurePursuitFollower,
 )
+
+from car_tools.camera_input import CameraConfig, PiCarXCamera
+from car_tools.obstacle_detection import (
+    CameraIntrinsics,
+    ConservativeCorrectionConfig,
+    ConservativePoseEstimator,
+    MonocularVSLAM,
+    VslamConfig,
+)
 from model import Path, Pose, TargetPoint
 
 
@@ -77,6 +86,7 @@ def _heading_error_to_point_deg(pose: Pose, target: TargetPoint) -> float:
 def _pivot_reverse_duration_s(
     *,
     loop_cfg: LoopConfig,
+    follower: PurePursuitFollower,
     drive_speed: int,
     heading_error_deg: float,
 ) -> float:
@@ -101,6 +111,7 @@ def _pivot_reverse_duration_s(
 def _pivot_reverse_yaw_delta_rad(
     *,
     loop_cfg: LoopConfig,
+    follower: PurePursuitFollower,
     drive_speed: int,
     heading_error_deg: float,
     duration_s: float,
@@ -117,7 +128,7 @@ def _pivot_reverse_yaw_delta_rad(
 
 def _pivot_reverse_step_cells(
     *,
-    follower: PathFollower,
+    follower: PurePursuitFollower,
     yaw_delta_rad: float,
 ) -> float:
     yaw_deg = abs(math.degrees(float(yaw_delta_rad)))
@@ -176,11 +187,10 @@ def _tick_ultrasonic(
     motor: MotorController,
     shared_map: SharedMap,
     loop_cfg: LoopConfig,
-    car_id: int,
 ) -> Optional[float]:
     dist_cm = read_ultrasonic_cm(motor)
 
-    pose_world = shared_map.get_pose(car_id, frame="world")
+    pose_world = shared_map.get_pose(frame="world")
     if pose_world is not None:
         shared_map.add_ultra_obstacle(
             pose_world=pose_world,
@@ -195,10 +205,9 @@ def _current_pose_grid(
     *,
     shared_map: SharedMap,
     follower: PurePursuitFollower,
-    car_id: int,
     pose_estimator: Optional[DrivePoseEstimator],
 ) -> Pose:
-    pose_grid = shared_map.get_pose(car_id, frame="grid")
+    pose_grid = shared_map.get_pose(frame="grid")
     if pose_grid is not None:
         return pose_grid
 
@@ -207,7 +216,6 @@ def _current_pose_grid(
 
     return follower.integrate_dead_reckoning(
         shared_map=shared_map,
-        car_id=car_id,
         forward_step=0.0,
         yaw_delta=0.0,
     )
@@ -216,15 +224,14 @@ def _current_pose_grid(
 def _propagate_pose(
     *,
     shared_map: SharedMap,
-    car_id: int,
+    follower: PurePursuitFollower,
     pose_estimator: Optional[DrivePoseEstimator],
     forward_step: float,
     yaw_delta: float,
 ) -> None:
     if pose_estimator is None:
-        integrate_dead_reckoning(
+        follower.integrate_dead_reckoning(
             shared_map=shared_map,
-            car_id=car_id,
             forward_step=forward_step,
             yaw_delta=yaw_delta,
         )
@@ -312,6 +319,54 @@ def _log_drive_status(
         f"mode={drive_mode} speed={speed}"
     )
 
+def build_visual_test_stack(
+    shared_map: SharedMap,
+) -> tuple[Optional[ConservativePoseEstimator], Optional[Callable[[], object]], Optional[Callable[[], None]]]:
+    frame_provider = PiCarXCamera(CameraConfig(
+        display_local=False,
+        display_web=False,
+        frame_size=(640, 480),
+        frame_rate=30,
+    ))
+    frame_provider.start()
+    if not frame_provider.is_opened():
+        frame_provider.release()
+        return None, None
+
+    frame_w, frame_h = frame_provider.frame_size()
+    focal_px = 0.9 * max(frame_w, frame_h)
+    intrinsics = CameraIntrinsics(
+        fx=float(focal_px),
+        fy=float(focal_px),
+        cx=0.5 * float(frame_w),
+        cy=0.5 * float(frame_h),
+    )
+
+    visual_localizer = MonocularVSLAM(
+        intrinsics,
+        shared_map,
+        cfg=VslamConfig(
+            debug_draw_keypoints=True,
+            debug_draw_matches=False,
+            publish_pose_to_shared_map=False,
+            pose_ema_alpha=0.15,
+        ),
+    )
+    pose_estimator = ConservativePoseEstimator(
+        shared_map,
+        visual_localizer=visual_localizer,
+        cfg=ConservativeCorrectionConfig(
+            min_cycles_between_corrections=6,
+            min_seconds_between_corrections=0.75,
+            min_translation_between_corrections=1.0,
+            min_heading_change_between_corrections_deg=10.0,
+            position_agreement_threshold=0.8,
+            heading_agreement_threshold_deg=10.0,
+            correction_alpha=0.2,
+            min_visual_confidence=0.6,
+        ),
+    )
+    return pose_estimator, frame_provider.get_frame, frame_provider.release
 
 def drive_path(
     path: Path,
@@ -320,15 +375,12 @@ def drive_path(
     follower: PurePursuitFollower,
     motor: MotorController,
     loop_cfg: LoopConfig,
-    car_id: int = 0,
     timeout_s: float = 180.0,
-    debug_show_grid: bool = False,
-    debug_show_visual: bool = False,
-    pose_estimator: Optional[DrivePoseEstimator] = None,
-    visual_frame_provider: Optional[Callable[[], Any]] = None,
 ) -> bool:
     if path is None or len(path.waypoints) < 2:
         raise ValueError("drive_path requires a Path with at least two waypoints")
+    
+    pose_estimator, visual_frame_provider, close_frame_provider = build_visual_test_stack(shared_map)
 
     total_progress = _path_length(path)
     best_progress = 0.0
@@ -349,13 +401,11 @@ def drive_path(
                     motor=motor,
                     shared_map=shared_map,
                     loop_cfg=loop_cfg,
-                    car_id=car_id,
                 )
 
             pose_grid = _current_pose_grid(
                 shared_map=shared_map,
                 follower=follower,
-                car_id=car_id,
                 pose_estimator=pose_estimator,
             )
 
@@ -412,6 +462,7 @@ def drive_path(
                     )
                     pivot_duration_s = _pivot_reverse_duration_s(
                         loop_cfg=loop_cfg,
+                        follower=follower,
                         drive_speed=drive_speed,
                         heading_error_deg=heading_error_deg,
                     )
@@ -427,6 +478,7 @@ def drive_path(
                     steer_deg = odom_steer_deg
                     yaw_delta = _pivot_reverse_yaw_delta_rad(
                         loop_cfg=loop_cfg,
+                        follower=follower,
                         drive_speed=drive_speed,
                         heading_error_deg=heading_error_deg,
                         duration_s=pivot_duration_s,
@@ -452,7 +504,7 @@ def drive_path(
                     )
                 _propagate_pose(
                     shared_map=shared_map,
-                    car_id=car_id,
+                    follower=follower,
                     pose_estimator=pose_estimator,
                     forward_step=odom_step_cells,
                     yaw_delta=yaw_delta,
@@ -473,11 +525,6 @@ def drive_path(
                 odom_steer_deg=odom_steer_deg,
             )
 
-            if debug_show_visual:
-                _maybe_show_visual_debug_frame(
-                    pose_estimator=pose_estimator,
-                )
-
             _log_drive_status(
                 pose_grid=pose_grid,
                 waypoint_idx=current_wp_idx,
@@ -496,34 +543,61 @@ def drive_path(
                 speed=command.speed,
             )
 
-            if debug_show_grid:
-                live_pose = shared_map.get_pose(car_id, frame="grid")
-                live_info = [
-                    (
-                        f"mode={command.drive_mode} d={d_goal:.2f} "
-                        f"head_err={command.heading_error_deg:.1f} "
-                        f"cmd={command.commanded_steer_deg:.1f} app={command.odom_steer_deg:.1f}"
-                    ),
-                    (
-                        f"ultra={'None' if latest_ultra_cm is None else f'{latest_ultra_cm:.1f}cm'} "
-                        f"path_n={len(path.waypoints)} speed={command.speed}"
-                    ),
-                ]
-                if live_pose is not None:
-                    live_info.append(
-                        f"pose=({live_pose.x:.2f},{live_pose.y:.2f},{live_pose.theta:.2f})"
-                    )
-                frame = shared_map.render_grid_debug_view(
-                    car_id=car_id,
-                    path=path,
-                    target=active_wp,
-                    control_target=TargetPoint(command.target_x, command.target_y),
-                    cell_px=14,
-                    info_lines=live_info,
-                )
-                cv2.imshow("Planning debug", frame)
-                cv2.waitKey(1)
-    finally:
-        motor.stop()
+            # Debug keypoint frames
+            _maybe_show_visual_debug_frame(
+                pose_estimator=pose_estimator,
+            )
 
+            # Debug grid
+            live_pose = shared_map.get_pose(frame="grid")
+            live_info = [
+                (
+                    f"mode={command.drive_mode} d={d_goal:.2f} "
+                    f"head_err={command.heading_error_deg:.1f} "
+                    f"cmd={command.commanded_steer_deg:.1f} app={command.odom_steer_deg:.1f}"
+                ),
+                (
+                    f"ultra={'None' if latest_ultra_cm is None else f'{latest_ultra_cm:.1f}cm'} "
+                    f"path_n={len(path.waypoints)} speed={command.speed}"
+                ),
+            ]
+            if live_pose is not None:
+                live_info.append(
+                    f"pose=({live_pose.x:.2f},{live_pose.y:.2f},{live_pose.theta:.2f})"
+                )
+            frame = shared_map.render_grid_debug_view(
+                path=path,
+                target=active_wp,
+                control_target=TargetPoint(command.target_x, command.target_y),
+                cell_px=14,
+                info_lines=live_info,
+            )
+            cv2.imshow("Planning debug", frame)
+            cv2.waitKey(1)
+    finally:
+        if close_frame_provider is not None:
+            close_frame_provider()
+        motor.stop()
     return False
+
+def start_path(
+    path: Path,
+    *,
+    shared_map: SharedMap,
+    follower: PurePursuitFollower,
+    motor: MotorController,
+    loop_cfg: LoopConfig,
+    timeout_s: float = 180.0,
+) -> bool:
+    if follower.shape == "circle":
+        follower.follow(path)
+    else:
+        drive_path(
+            path,
+            shared_map=shared_map,
+            follower=follower,
+            motor=motor,
+            loop_cfg=loop_cfg,
+            timeout_s=timeout_s,
+        )
+    return True

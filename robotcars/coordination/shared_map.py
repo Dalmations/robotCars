@@ -6,11 +6,7 @@ from typing import Dict, List, Optional, Tuple, Literal, Literal
 import numpy as np
 
 from model import Pose, TargetPoint, Path, Obstacle
-
-try:
-    import cv2
-except Exception:  # pragma: no cover
-    cv2 = None
+import cv2
 
 
 GridPoint = Tuple[int, int]
@@ -43,12 +39,12 @@ class SharedMap:
     """
     Shared state for planning and localization.
 
-    - `poses` are stored in world coordinates.
+    - `pose` is stored in world coordinates.
     - `obstacles` are stored in world coordinates.
     - `map_points` are sparse SLAM points stored as world-space tuples.
     """
     obstacles: Dict[str, Obstacle] = field(default_factory=dict)
-    poses: Dict[int, Pose] = field(default_factory=dict)
+    pose: Pose
     map_points: List[Tuple[float, float, float]] = field(default_factory=list)
 
     _static_grid: Optional[np.ndarray] = None
@@ -56,17 +52,16 @@ class SharedMap:
 
     # ---------------- Pose + SLAM points ----------------
 
-    def set_pose(self, car_id: int, pose: Pose) -> None:
-        self.poses[car_id] = pose
+    def set_pose(self, pose: Pose) -> None:
+        self.pose = pose
 
-    def get_pose(self, car_id: int = 0, frame: FrameName = "world") -> Optional[Pose]:
-        pose = self.poses.get(car_id)
-        if pose is None:
+    def get_pose(self, frame: FrameName = "world") -> Optional[Pose]:
+        if self.pose is None:
             return None
         if frame == "world":
-            return pose
-        gx, gy = self.world_to_grid_f(pose.x, pose.y)
-        return Pose(x=float(gx), y=float(gy), theta=float(pose.theta))
+            return self.pose
+        gx, gy = self.world_to_grid_f(self.pose.x, self.pose.y)
+        return Pose(x=float(gx), y=float(gy), theta=float(self.pose.theta))
 
     def add_map_points(self, pts3: np.ndarray, *, max_points: int = 5000, stride: int = 1) -> None:
         if pts3 is None or not isinstance(pts3, np.ndarray) or pts3.size == 0:
@@ -83,7 +78,7 @@ class SharedMap:
 
     def reset(self) -> None:
         self.obstacles.clear()
-        self.poses.clear()
+        self.pose = None
         self.map_points.clear()
 
     # ---------------- World <-> Grid ----------------
@@ -126,8 +121,8 @@ class SharedMap:
         y = float(oy) + float(gy) * r
         return x, y
 
-    def get_car_grid_position(self, car_id: int = 0) -> GridPoint:
-        pose = self.poses.get(car_id)
+    def get_car_grid_position(self) -> GridPoint:
+        pose = self.poses.get()
         if pose is None:
             return (0, 0)
         return self.world_to_grid(pose.x, pose.y)
@@ -212,7 +207,6 @@ class SharedMap:
     def render_grid_debug_view(
         self,
         *,
-        car_id: int = 0,
         path: Optional[Path] = None,
         target: Optional[TargetPoint] = None,
         control_target: Optional[TargetPoint] = None,
@@ -322,7 +316,7 @@ class SharedMap:
             else:
                 fill_cell(int(round(target.x)), int(round(target.y)), target_color, pad=max(2, cell_px // 5))
 
-        pose_grid = self.get_pose(car_id, frame="grid")
+        pose_grid = self.get_pose(frame="grid")
         if pose_grid is not None:
             center = grid_to_px(pose_grid.x, pose_grid.y)
             if cv2 is not None and control_target is not None:
@@ -368,7 +362,7 @@ class SharedMap:
                 fill_cell(int(round(control_target.x)), int(round(control_target.y)), control_target_color, pad=max(2, cell_px // 5))
 
         if cv2 is not None:
-            info = [f"car={car_id}"]
+            info = []
             if pose_grid is not None:
                 info.append(f"pose=({pose_grid.x:.1f},{pose_grid.y:.1f},{pose_grid.theta:.2f})")
             if target is not None:

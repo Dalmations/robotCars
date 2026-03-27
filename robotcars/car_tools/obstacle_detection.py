@@ -284,7 +284,7 @@ class MonocularVSLAM:
             self._last.pose_Tcw = self._Tcw.copy()
 
         if publish or bool(self.cfg.publish_pose_to_shared_map):
-            self.shared_map.set_pose(self.car_id, self.get_pose_estimate(filtered=True))
+            self.shared_map.set_pose(self.get_pose_estimate(filtered=True))
 
         return self.get_pose_estimate(filtered=True)
 
@@ -462,7 +462,7 @@ class MonocularVSLAM:
                 self._pose_filt = Pose(x=float(xf), y=float(yf), theta=float(thf))
 
         if bool(self.cfg.publish_pose_to_shared_map):
-            self.shared_map.set_pose(self.car_id, self.get_pose_estimate(filtered=True))
+            self.shared_map.set_pose(self.get_pose_estimate(filtered=True))
 
     def _apply_planar_motion(self, *, forward_step: float, yaw_delta: float) -> None:
         pose = self._planar_pose_from_Tcw(self._Tcw)
@@ -884,12 +884,10 @@ class ConservativePoseEstimator:
         self,
         shared_map: SharedMap,
         *,
-        car_id: int = 0,
         visual_localizer: Optional[MonocularVSLAM] = None,
         cfg: Optional[ConservativeCorrectionConfig] = None,
     ):
         self.shared_map = shared_map
-        self.car_id = car_id
         self.visual_localizer = visual_localizer
         self.cfg = cfg or ConservativeCorrectionConfig()
 
@@ -909,15 +907,15 @@ class ConservativePoseEstimator:
             self.visual_localizer.set_pose_estimate(self.get_pose(frame="world"))
 
     def get_pose(self, *, frame: Literal["world", "grid"] = "world") -> Pose:
-        pose_world = self.shared_map.get_pose(self.car_id, frame="world")
+        pose_world = self.shared_map.get_pose(frame="world")
         if pose_world is None:
             pose_world = Pose(0.0, 0.0, 0.0)
-            self.shared_map.set_pose(self.car_id, pose_world)
+            self.shared_map.set_pose(pose_world)
 
         if frame == "world":
             return _copy_pose(pose_world)
 
-        pose_grid = self.shared_map.get_pose(self.car_id, frame="grid")
+        pose_grid = self.shared_map.get_pose(frame="grid")
         if pose_grid is not None:
             return pose_grid
 
@@ -944,7 +942,7 @@ class ConservativePoseEstimator:
             forward_step=forward_step,
             yaw_delta=yaw_delta,
         )
-        self.shared_map.set_pose(self.car_id, next_pose)
+        self.shared_map.set_pose(next_pose)
 
         self._pending_translation += float(forward_step)
         self._pending_yaw += float(yaw_delta)
@@ -1064,7 +1062,7 @@ class ConservativePoseEstimator:
                 accepted = True
                 fused_pose = _blend_pose(dead_reckoning_pose, obstacle_pose_copy, float(self.cfg.correction_alpha))
 
-        self.shared_map.set_pose(self.car_id, fused_pose)
+        self.shared_map.set_pose(fused_pose)
         self.visual_localizer.set_pose_estimate(fused_pose, reset_filter=True, sync_last_frame=True)
 
         self._last_result = ConservativeCorrectionResult(

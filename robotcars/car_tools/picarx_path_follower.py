@@ -78,9 +78,11 @@ class PurePursuitFollower:
         self.cfg = cfg or FollowerConfig()
         self.params = params
         self._filtered_steer_deg = 0.0
+        self.shape = None
         
 
     # def follow(self, path: Path, start_pose: Optional[Pose2D] = None) -> None:
+    # Use for circle
     def follow(self, path: Path, start_pose: Optional[Pose2D] = None, on_tick: Optional[TickCallback] = None) -> None:
         wps = path.waypoints
         if len(wps) < 2:
@@ -158,6 +160,7 @@ class PurePursuitFollower:
             return (distance - self.cfg.stop_dist) / (self.cfg.safe_dist - self.cfg.stop_dist)
     
     def update_params(self, shape):
+        self.shape = shape
         if shape in self.params:
             self.cfg.wheelbase = self.params[shape]['wheelbase']
 
@@ -373,13 +376,12 @@ class PurePursuitFollower:
         return max(-self.cfg.max_steer_deg, min(self.cfg.max_steer_deg, steer_deg))
 
     def integrate_dead_reckoning(
-        *,
+        self,
         shared_map: SharedMap,
-        car_id: int,
         forward_step: float,
         yaw_delta: float,
     ) -> Pose:
-        pose_world = shared_map.get_pose(car_id, frame="world")
+        pose_world = shared_map.get_pose(frame="world")
         if pose_world is None:
             pose_world = Pose(0.0, 0.0, 0.0)
         step = float(forward_step)
@@ -390,12 +392,12 @@ class PurePursuitFollower:
             y=float(pose_world.y + step * math.sin(theta_mid)),
             theta=float(self._wrap_angle(float(pose_world.theta) + dtheta)),
         )
-        shared_map.set_pose(car_id, next_pose)
+        shared_map.set_pose(next_pose)
         return next_pose
     
     def estimate_step_cells_for_duration(
+        self,
         duration_s: float,
-        *,
         action_tick_s: float,
         speed: int,
         speed_ref: int,
