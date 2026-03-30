@@ -5,6 +5,7 @@ import threading
 from car_tools.movement import plan_formation
 from car_tools.motor_controller import MotorController, MotorConfig
 from car_tools.picarx_path_follower import PurePursuitFollower, FollowerConfig
+from car_tools.oled_display import display_text
 
 from coordination.shared_map import SharedMap
 from main import (
@@ -14,6 +15,7 @@ from main import (
 
 from test_drive_path import LoopConfig, start_path
 from speech_input.processor import handle_input
+from speech_input.shapes import SHAPES
 from picarx.stt import Vosk
 
 
@@ -103,6 +105,7 @@ def leader_main():
     vosk = Vosk(language="en-us")
     shared_map = build_shared_map()
     loop_cfg = build_loop_config()
+    display_text('Listening')
     while True:
         try:
             print('Listening')
@@ -111,6 +114,11 @@ def leader_main():
             if not phrase:
                continue
             shape, robots = handle_input(phrase)
+            if shape not in SHAPES:
+                display_text(f'Try again\n{phrase}')
+                continue
+            else:
+                display_text(shape)
             if not robots:
                 fc.publish_broadcast({'message':shape})
             else:
