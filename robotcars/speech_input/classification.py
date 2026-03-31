@@ -5,7 +5,7 @@ import re
 from speech_input.shapes import SHAPES
 
 EMBEDDING_FILE = "speech_input/shape_embeddings.pkl"
-THRESHOLD = 0.6
+THRESHOLD = 0.58
 
 def embed(texts):
     return model.encode(texts, normalize_embeddings=True)

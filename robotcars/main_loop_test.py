@@ -71,7 +71,7 @@ def build_follower(motor: MotorController) -> PurePursuitFollower:
     return follower
 
 def follower_main():
-    fc = FollowerClient(IDENTITY, "10.229.180.83")
+    fc = FollowerClient(IDENTITY, "192.168.4.1")
     fc.start() 
     motor = MotorController(MotorConfig(speed=80))
     follower = build_follower(motor)

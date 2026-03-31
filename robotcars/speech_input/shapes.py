@@ -9,6 +9,27 @@ SHAPES = {
         'drive in a cirlce',
         'drive in a circular motion'
     ],
+    "hexagon": [
+        "hexagon",
+        'drive in a hexagon',
+        'a shape with six sides',
+        'six sided polygon'
+    ],
+    "pentagon": [
+        "a shape with five sides",
+        "five sided polygon",
+        "a polygon with five angles",
+        "pentagon",
+        'drive in a pentagon'
+    ],
+    "square": [
+        'square',
+        'drive in a square',
+        'a shape with four sides',
+        'four sided polygon',
+        'a shape with four right angles',
+        'a square figure'
+    ],
     "triangle": [
         "a shape with three sides",
         "three cornered polygon",
@@ -16,9 +37,6 @@ SHAPES = {
         "three straight edges meeting at vertices",
         "a three sided figure",
         "triangle"
-    ],
-    "square": [
-        'square'
     ],
     "rectangle": [
         "a shape with four right angles",
@@ -35,13 +53,5 @@ SHAPES = {
         "a skewed four sided polygon",
         "a sloping four sided shape",
         "parallelogram"
-    ],
-    "pentagon": [
-        "a shape with five sides",
-        "five sided polygon",
-        "a polygon with five angles",
-        "five straight edges forming a closed shape",
-        "a five cornered figure",
-        "pentagon"
     ]
 }
