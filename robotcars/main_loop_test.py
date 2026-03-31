@@ -7,13 +7,12 @@ from car_tools.motor_controller import MotorController, MotorConfig
 from car_tools.picarx_path_follower import PurePursuitFollower, FollowerConfig
 from car_tools.oled_display import display_text
 
-from coordination.shared_map import SharedMap
 from main import (
     build_shared_map,
     build_loop_config,
 )
 
-from test_drive_path import LoopConfig, start_path
+from test_drive_path import start_path
 from speech_input.processor import handle_input
 from speech_input.shapes import SHAPES
 from picarx.stt import Vosk

@@ -2,15 +2,13 @@
 # Builds the shared map, motor, follower, and a fixed shape path, then follows it once.
 from __future__ import annotations
 
-import time
-from typing import Callable, Optional
-
 import cv2
-from car_tools.movement import build_square_route, route_to_path
+from car_tools.movement import build_square_route, route_to_path, plan_formation
 from car_tools.motor_controller import MotorConfig, MotorController
 from coordination.shared_map import SharedMap
 from model import Path, Pose
-from test_drive_path import LoopConfig, drive_path
+from test_drive_path import LoopConfig, start_path
+from main_loop_test import build_follower
 
 def build_shared_map() -> SharedMap:
     shared_map = SharedMap()
@@ -49,3 +47,37 @@ def build_route(shared_map: SharedMap) -> list[tuple[int, int]]:
 
 def build_path(shared_map: SharedMap) -> Path:
     return route_to_path(build_route(shared_map))
+
+def main() -> None:
+    shared_map = build_shared_map()
+    motor = build_motor()
+    follower = build_follower(motor)
+    loop_cfg = build_loop_config()
+    path = build_path(shared_map)
+
+    try:
+        shape = 'square'
+        path = plan_formation(shared_map, shape)
+        follower.update_params(shape)
+        start_path(
+            path,
+            shared_map=shared_map,
+            follower=follower,
+            motor=motor,
+            loop_cfg=loop_cfg,
+            timeout_s=180.0,
+        )
+        motor.stop()
+    finally:
+        motor.stop()
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
