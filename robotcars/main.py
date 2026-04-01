@@ -2,7 +2,7 @@
 # Builds the shared map, motor, follower, and a fixed shape path, then follows it once.
 from __future__ import annotations
 
-import cv2
+# import cv2
 from car_tools.movement import build_square_route, route_to_path, plan_formation
 from car_tools.motor_controller import MotorConfig, MotorController
 from car_tools.picarx_path_follower import PurePursuitFollower, FollowerConfig
@@ -30,6 +30,14 @@ def build_motor() -> MotorController:
 def build_loop_config() -> LoopConfig:
     return LoopConfig(
         cm_per_grid= 20,                           # centimeters per cell
+        action_tick_s = 0.10,
+        ultra_stop_cm = 20.0,
+        pivot_turn_heading_deg = 45.0,
+        pivot_turn_exit_deg = 20.0,
+        pivot_turn_steer_deg = 30.0,
+        pivot_turn_settle_s = 0.12,
+        pivot_turn_deg_per_s = 12.0,
+        pivot_turn_cells_per_deg = 0.05
     )
 
 
@@ -76,10 +84,10 @@ def main() -> None:
         motor.stop()
     finally:
         motor.stop()
-        try:
-            cv2.destroyAllWindows()
-        except Exception:
-            pass
+        # try:
+        #     cv2.destroyAllWindows()
+        # except Exception:
+        #     pass
 
 
 if __name__ == "__main__":

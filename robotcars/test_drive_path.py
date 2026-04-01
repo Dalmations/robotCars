@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Protocol
 
-import cv2
+# import cv2
 
 from car_tools.camera_input import read_ultrasonic_cm
 from coordination.shared_map import SharedMap
@@ -15,14 +15,6 @@ from car_tools.picarx_path_follower import (
     PurePursuitFollower,
 )
 
-from car_tools.camera_input import CameraConfig, PiCarXCamera
-from car_tools.obstacle_detection import (
-    CameraIntrinsics,
-    ConservativeCorrectionConfig,
-    ConservativePoseEstimator,
-    MonocularVSLAM,
-    VslamConfig,
-)
 from model import Path, Pose, TargetPoint
 
 
@@ -50,15 +42,15 @@ class DriveCommand:
     odom_steer_deg: float = 0.0
 
 
-class DrivePoseEstimator(Protocol):
-    def get_pose(self, *, frame: str = "world") -> Pose: ...
-    def propagate_dead_reckoning(self, *, forward_step: float, yaw_delta: float) -> Pose: ...
-    def maybe_correct_from_obstacle_detection(
-        self,
-        frame_rgb_or_bgr: Optional[Any] = None,
-        *,
-        now_s: Optional[float] = None,
-    ) -> Any: ...
+# class DrivePoseEstimator(Protocol):
+#     def get_pose(self, *, frame: str = "world") -> Pose: ...
+#     def propagate_dead_reckoning(self, *, forward_step: float, yaw_delta: float) -> Pose: ...
+#     def maybe_correct_from_obstacle_detection(
+#         self,
+#         frame_rgb_or_bgr: Optional[Any] = None,
+#         *,
+#         now_s: Optional[float] = None,
+#     ) -> Any: ...
 
 
 def _current_leg_path(path: Path, waypoint_idx: int) -> Path:
@@ -201,14 +193,13 @@ def _current_pose_grid(
     *,
     shared_map: SharedMap,
     follower: PurePursuitFollower,
-    pose_estimator: Optional[DrivePoseEstimator],
 ) -> Pose:
     pose_grid = shared_map.get_pose(frame="grid")
     if pose_grid is not None:
         return pose_grid
 
-    if pose_estimator is not None:
-        return pose_estimator.get_pose(frame="grid")
+    # if pose_estimator is not None:
+    #     return pose_estimator.get_pose(frame="grid")
 
     return follower.integrate_dead_reckoning(
         shared_map=shared_map,
@@ -221,47 +212,46 @@ def _propagate_pose(
     *,
     shared_map: SharedMap,
     follower: PurePursuitFollower,
-    pose_estimator: Optional[DrivePoseEstimator],
     forward_step: float,
     yaw_delta: float,
 ) -> None:
-    if pose_estimator is None:
-        follower.integrate_dead_reckoning(
-            shared_map=shared_map,
-            forward_step=forward_step,
-            yaw_delta=yaw_delta,
-        )
-        return
-
-    pose_estimator.propagate_dead_reckoning(
+    # if pose_estimator is None:
+    follower.integrate_dead_reckoning(
+        shared_map=shared_map,
         forward_step=forward_step,
         yaw_delta=yaw_delta,
     )
+    return
+
+    # pose_estimator.propagate_dead_reckoning(
+    #     forward_step=forward_step,
+    #     yaw_delta=yaw_delta,
+    # )
 
 
-def _maybe_apply_visual_correction(
-    *,
-    pose_estimator: Optional[DrivePoseEstimator],
-    visual_frame_provider: Optional[Callable[[], Any]],
-    now_s: float,
-) -> None:
-    if pose_estimator is None:
-        return
+# def _maybe_apply_visual_correction(
+#     *,
+#     pose_estimator: Optional[DrivePoseEstimator],
+#     visual_frame_provider: Optional[Callable[[], Any]],
+#     now_s: float,
+# ) -> None:
+#     if pose_estimator is None:
+#         return
 
-    correction = pose_estimator.maybe_correct_from_obstacle_detection(
-        frame_provider=visual_frame_provider,
-        now_s=now_s,
-    )
-    if not correction.attempted:
-        return
+#     correction = pose_estimator.maybe_correct_from_obstacle_detection(
+#         frame_provider=visual_frame_provider,
+#         now_s=now_s,
+#     )
+#     if not correction.attempted:
+#         return
 
-    print(
-        "visual_corr "
-        f"accepted={int(correction.accepted)} "
-        f"reason={correction.reason} "
-        f"head_err={correction.heading_error_deg:.1f} "
-        f"conf={correction.visual_confidence:.2f}"
-    )
+#     print(
+#         "visual_corr "
+#         f"accepted={int(correction.accepted)} "
+#         f"reason={correction.reason} "
+#         f"head_err={correction.heading_error_deg:.1f} "
+#         f"conf={correction.visual_confidence:.2f}"
+#     )
 
 
 def _log_drive_status(
@@ -295,46 +285,46 @@ def _log_drive_status(
         f"mode={drive_mode} speed={speed}"
     )
 
-def build_visual_test_stack(
-    shared_map: SharedMap,
-) -> tuple[Optional[ConservativePoseEstimator], Optional[PiCarXCamera]]:
-    frame_provider = PiCarXCamera(CameraConfig(
-        display_local=True,
-        display_web=False,
-        frame_size=(640, 480),
-        frame_rate=30,
-    ))
-    frame_provider.start()
+# def build_visual_test_stack(
+#     shared_map: SharedMap,
+# ) -> tuple[Optional[ConservativePoseEstimator], Optional[PiCarXCamera]]:
+#     frame_provider = PiCarXCamera(CameraConfig(
+#         display_local=True,
+#         display_web=False,
+#         frame_size=(640, 480),
+#         frame_rate=30,
+#     ))
+#     frame_provider.start()
 
-    frame_w, frame_h = frame_provider.cfg.frame_size
-    focal_px = 0.9 * max(frame_w, frame_h)
-    intrinsics = CameraIntrinsics(
-        fx=float(focal_px),
-        fy=float(focal_px),
-        cx=0.5 * float(frame_w),
-        cy=0.5 * float(frame_h),
-    )
+#     frame_w, frame_h = frame_provider.cfg.frame_size
+#     focal_px = 0.9 * max(frame_w, frame_h)
+#     intrinsics = CameraIntrinsics(
+#         fx=float(focal_px),
+#         fy=float(focal_px),
+#         cx=0.5 * float(frame_w),
+#         cy=0.5 * float(frame_h),
+#     )
 
-    visual_localizer = MonocularVSLAM(
-        intrinsics,
-        cfg=VslamConfig(
-            pose_ema_alpha=0.15,
-        ),
-    )
-    pose_estimator = ConservativePoseEstimator(
-        shared_map,
-        visual_localizer=visual_localizer,
-        cfg=ConservativeCorrectionConfig(
-            min_cycles_between_corrections=6,
-            min_seconds_between_corrections=0.75,
-            min_translation_between_corrections=1.0,
-            min_heading_change_between_corrections_deg=10.0,
-            heading_agreement_threshold_deg=10.0,
-            correction_alpha=0.2,
-            min_visual_confidence=0.6,
-        ),
-    )
-    return pose_estimator, frame_provider
+#     visual_localizer = MonocularVSLAM(
+#         intrinsics,
+#         cfg=VslamConfig(
+#             pose_ema_alpha=0.15,
+#         ),
+#     )
+#     pose_estimator = ConservativePoseEstimator(
+#         shared_map,
+#         visual_localizer=visual_localizer,
+#         cfg=ConservativeCorrectionConfig(
+#             min_cycles_between_corrections=6,
+#             min_seconds_between_corrections=0.75,
+#             min_translation_between_corrections=1.0,
+#             min_heading_change_between_corrections_deg=10.0,
+#             heading_agreement_threshold_deg=10.0,
+#             correction_alpha=0.2,
+#             min_visual_confidence=0.6,
+#         ),
+#     )
+#     return pose_estimator, frame_provider
 
 def drive_path(
     path: Path,
@@ -348,7 +338,7 @@ def drive_path(
     if path is None or len(path.waypoints) < 2:
         raise ValueError("drive_path requires a Path with at least two waypoints")
     
-    pose_estimator, frame_provider = build_visual_test_stack(shared_map)
+    # pose_estimator, frame_provider = build_visual_test_stack(shared_map)
 
     total_progress = _path_length(path)
     best_progress = 0.0
@@ -374,7 +364,7 @@ def drive_path(
             pose_grid = _current_pose_grid(
                 shared_map=shared_map,
                 follower=follower,
-                pose_estimator=pose_estimator,
+                # pose_estimator=pose_estimator,
             )
 
             active_wp = path.waypoints[current_wp_idx]
@@ -401,7 +391,7 @@ def drive_path(
                 d_goal,
                 steer_cap_deg=follower.cfg.max_steer_deg,
             )
-            motor.set_steering(steer_deg)
+            motor.set_steering(0) #steer_deg
 
             drive_mode = "track"
             drive_speed = int(motor.cfg.speed)
@@ -473,15 +463,15 @@ def drive_path(
                 _propagate_pose(
                     shared_map=shared_map,
                     follower=follower,
-                    pose_estimator=pose_estimator,
+                    # pose_estimator=pose_estimator,
                     forward_step=odom_step_cells,
                     yaw_delta=yaw_delta,
                 )
-                _maybe_apply_visual_correction(
-                    pose_estimator=pose_estimator,
-                    visual_frame_provider=None if frame_provider is None else frame_provider.read,
-                    now_s=time.time(),
-                )
+                # _maybe_apply_visual_correction(
+                #     pose_estimator=pose_estimator,
+                #     visual_frame_provider=None if frame_provider is None else frame_provider.read,
+                #     now_s=time.time(),
+                # )
 
             command = DriveCommand(
                 target_x=target_x,
@@ -511,34 +501,33 @@ def drive_path(
                 speed=command.speed,
             )
 
-            # Debug grid
-            live_pose = shared_map.get_pose(frame="grid")
-            live_info = [
-                (
-                    f"mode={command.drive_mode} d={d_goal:.2f} "
-                    f"head_err={command.heading_error_deg:.1f} "
-                    f"cmd={command.commanded_steer_deg:.1f} app={command.odom_steer_deg:.1f}"
-                ),
-                (
-                    f"ultra={'None' if latest_ultra_cm is None else f'{latest_ultra_cm:.1f}cm'} "
-                    f"path_n={len(path.waypoints)} speed={command.speed}"
-                ),
-            ]
-            if live_pose is not None:
-                live_info.append(
-                    f"pose=({live_pose.x:.2f},{live_pose.y:.2f},{live_pose.theta:.2f})"
-                )
-            frame = shared_map.render_grid_debug_view(
-                path=path,
-                target=active_wp,
-                control_target=TargetPoint(command.target_x, command.target_y),
-                cell_px=14,
-                info_lines=live_info,
-            )
-            cv2.imshow("Planning debug", frame)
-            cv2.waitKey(1)
+            # # Debug grid
+            # live_pose = shared_map.get_pose(frame="grid")
+            # live_info = [
+            #     (
+            #         f"mode={command.drive_mode} d={d_goal:.2f} "
+            #         f"head_err={command.heading_error_deg:.1f} "
+            #         f"cmd={command.commanded_steer_deg:.1f} app={command.odom_steer_deg:.1f}"
+            #     ),
+            #     (
+            #         f"ultra={'None' if latest_ultra_cm is None else f'{latest_ultra_cm:.1f}cm'} "
+            #         f"path_n={len(path.waypoints)} speed={command.speed}"
+            #     ),
+            # ]
+            # if live_pose is not None:
+            #     live_info.append(
+            #         f"pose=({live_pose.x:.2f},{live_pose.y:.2f},{live_pose.theta:.2f})"
+            #     )
+            # frame = shared_map.render_grid_debug_view(
+            #     path=path,
+            #     target=active_wp,
+            #     control_target=TargetPoint(command.target_x, command.target_y),
+            #     cell_px=14,
+            #     info_lines=live_info,
+            # )
+            # cv2.imshow("Planning debug", frame)
+            # cv2.waitKey(1)
     finally:
-        frame_provider.stop()
         motor.stop()
     return False
 
