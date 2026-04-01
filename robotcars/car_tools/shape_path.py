@@ -15,7 +15,7 @@ def drive_in_shape(sides):
 		print("A shape must have at least 3 sides")
 		return
 
-	time = (1/sides)*6.8
+	t = (1/sides)*6.8
 
 	for i in range(sides):
 		motor.set_steering(0)
@@ -23,6 +23,6 @@ def drive_in_shape(sides):
 		motor.set_steering(-90)
 		motor.backward_for(calibrate_sec)
 		# motor.px.set_motor_speed(2, -20)
-		time.sleep(time)
+		time.sleep(t)
 		motor.stop()
 		motor.set_steering(0)
