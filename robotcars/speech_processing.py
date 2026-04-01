@@ -1,7 +1,7 @@
-from robotcars.car_tools.motor_controller import MotorController, MotorConfig
-from robotcars.car_tools.picarx_path_follower import PurePursuitFollower, FollowerConfig
-from robotcars.car_tools.movement import MovementPlanner
-from robotcars.car_tools.shape_path import drive_in_shape
+from car_tools.motor_controller import MotorController, MotorConfig
+from car_tools.picarx_path_follower import PurePursuitFollower, FollowerConfig
+from car_tools.movement import MovementPlanner
+from car_tools.shape_path import drive_in_shape
 
 try:
     from picarx.stt import Vosk

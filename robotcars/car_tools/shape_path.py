@@ -1,4 +1,4 @@
-from robotcars.car_tools.motor_controller import MotorController, MotorConfig
+from car_tools.motor_controller import MotorController, MotorConfig
 import time
 
 def drive_in_shape(sides):
