@@ -3,7 +3,8 @@ import time
 
 def drive_in_shape(sides):
 	motor = MotorController(MotorConfig(speed=50))
-
+	calibrate_sec = 2
+	# circle
 	if sides == 0:
 		motor.set_steering(30)
 		motor.forward_for(10)
@@ -20,7 +21,8 @@ def drive_in_shape(sides):
 		motor.set_steering(0)
 		motor.forward_for(1)
 		motor.set_steering(-90)
-		motor.px.set_motor_speed(2, -20)
+		motor.backward_for(calibrate_sec)
+		# motor.px.set_motor_speed(2, -20)
 		time.sleep(time)
 		motor.stop()
 		motor.set_steering(0)
