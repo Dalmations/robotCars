@@ -97,7 +97,7 @@ class PurePursuitFollower:
                 f.write(f'{pose.x, pose.y}  {self._dist((pose.x, pose.y), goal)}\n')
                 print(f'{pose.x, pose.y}  {self._dist((pose.x, pose.y), goal)}\n')
                 if on_tick is not None:
-                    on_tick(pose.x, pose.y, pose.yaw)
+                    on_tick(pose.x, pose.y, pose.theta)
                 
                 # break from following if within tolerance of goal and loop has been running for more than 2 seconds
                 # without the time condition, this breaks when start and goal positions are the same
@@ -166,7 +166,7 @@ class PurePursuitFollower:
 
         # Target heading in global
         target_heading = math.atan2(dy, dx)
-        alpha = self._wrap_angle(target_heading - pose.yaw)
+        alpha = self._wrap_angle(target_heading - pose.theta)
 
         Ld = max(1e-6, math.hypot(dx, dy))
         delta_rad = math.atan2(2.0 * self.cfg.wheelbase * math.sin(alpha), Ld)
@@ -196,9 +196,9 @@ class PurePursuitFollower:
           yaw += v/L * tan(delta) dt
         """
         delta = math.radians(steer_deg)
-        x = pose.x + v * math.cos(pose.yaw) * dt
-        y = pose.y + v * math.sin(pose.yaw) * dt
-        yaw = pose.yaw + (v / max(1e-6, L)) * math.tan(delta) * dt
+        x = pose.x + v * math.cos(pose.theta) * dt
+        y = pose.y + v * math.sin(pose.theta) * dt
+        yaw = pose.theta + (v / max(1e-6, L)) * math.tan(delta) * dt
         return Pose(x, y, self._wrap_angle(yaw))
 
     @staticmethod
