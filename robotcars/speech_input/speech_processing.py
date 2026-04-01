@@ -1,7 +1,6 @@
 from robotcars.car_tools.motor_controller import MotorController, MotorConfig
 from robotcars.car_tools.picarx_path_follower import PurePursuitFollower, FollowerConfig
 from robotcars.car_tools.movement import MovementPlanner
-from robotcars.model import Path
 from robotcars.car_tools.shape_path import drive_in_shape
 
 try:
@@ -39,8 +38,12 @@ if vosk:
         command = processCommand(result)
         if command == "circle":
             run_circle_demo()
+        elif command == "triangle":
+            drive_in_shape(3)
         elif command == "square":
             drive_in_shape(4)
+        elif command == "pentagon":
+            drive_in_shape(5)
         print(result)
 else:
     print("Speech recognition is not available.")

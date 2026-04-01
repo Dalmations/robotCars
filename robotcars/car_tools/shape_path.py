@@ -2,17 +2,25 @@ from robotcars.car_tools.motor_controller import MotorController, MotorConfig
 import time
 
 def drive_in_shape(sides):
+	motor = MotorController(MotorConfig(speed=50))
+
+	if sides == 0:
+		motor.set_steering(30)
+		motor.forward_for(10)
+		motor.stop()
+		motor.set_steering(0)
+		return
 	if sides < 3:
 		print("A shape must have at least 3 sides")
 		return
 
-	motor = MotorController(MotorConfig(speed=50))
+	time = (1/sides)*6.8
 
 	for i in range(sides):
 		motor.set_steering(0)
 		motor.forward_for(1)
 		motor.set_steering(-90)
 		motor.px.set_motor_speed(2, -20)
-		time.sleep(1.7)
+		time.sleep(time)
 		motor.stop()
 		motor.set_steering(0)
