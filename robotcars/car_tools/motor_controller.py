@@ -59,6 +59,16 @@ class MotorController:
         self.px.forward(self.cfg.speed)
         time.sleep(seconds)
         self.px.forward(0) #  stop between steps for predictability
+
+    def backward_for(self, seconds: float) -> None:
+        """
+        Drive forward for a duration, then stop.
+        """
+        if seconds <= 0:
+            return
+        self.px.backward(self.cfg.speed)
+        time.sleep(seconds)
+        self.px.forward(0) #  stop between steps for predictability
     
     def stop(self) -> None:
         self.px.stop()
