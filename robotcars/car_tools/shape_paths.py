@@ -1,9 +1,11 @@
 import time
 from car_tools.params import PARAMS
+from car_tools.motor_controller import MotorController
 import os
 
-def drive_in_shape(shape, motor):
+def drive_in_shape(shape, motor:MotorController):
 	params = PARAMS[os.uname().nodename][shape]
+	motor.cfg.speed = PARAMS[os.uname().nodename][shape]['speed']
 	match shape:
 		case 'circle':
 			motor.set_steering(params['steering'])

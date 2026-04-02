@@ -31,7 +31,7 @@ IDENTITY = os.uname().nodename
 def follower_main():
     #fc = FollowerClient(IDENTITY, "192.168.4.1")
     #fc.start() 
-    motor = MotorController(MotorConfig(speed=85))
+    motor = MotorController()
     while True:
         try:
             #msg = fc.message_q.get()
@@ -49,7 +49,7 @@ def follower_main():
 def leader_main():
     fc = FollowerClient(IDENTITY, 'localhost')
     fc.start()
-    motor = MotorController(MotorConfig(speed=80))
+    motor = MotorController()
     vosk = Vosk(language="en-us")
     display_text('Listening')
     while True:
