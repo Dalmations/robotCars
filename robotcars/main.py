@@ -32,12 +32,6 @@ def build_loop_config() -> LoopConfig:
         cm_per_grid= 20,                           # centimeters per cell
         action_tick_s = 0.10,
         ultra_stop_cm = 20.0,
-        pivot_turn_heading_deg = 45.0,
-        pivot_turn_exit_deg = 20.0,
-        pivot_turn_steer_deg = 30.0,
-        pivot_turn_settle_s = 0.12,
-        pivot_turn_deg_per_s = 12.0,
-        pivot_turn_cells_per_deg = 0.05
     )
 
 
