@@ -366,13 +366,15 @@ def drive_path(
                             pose_world = shared_map.get_pose(frame="world")
                             if pose_world is not None:
                                 shared_map.set_pose(Pose(
-                                    x=float(pose_world.x),
-                                    y=float(pose_world.y),
+                                    x=float(prev_wp.x),
+                                    y=float(prev_wp.y),
                                     theta=float(leg_theta),
                                 ))
-                        motor.set_steering(0) #steer_deg
-                        odom_step_cells = 0.0
-                        odom_steer_deg = motor.get_applied_steering_deg()
+                            steer_deg = 0.0
+                            heading_error_deg = 0.0
+                            motor.set_steering(steer_deg)
+                            odom_step_cells = 0.0
+                            odom_steer_deg = motor.get_applied_steering_deg()
                         follower.sync_to_motor_steering()
 
                 if pivot_active:
