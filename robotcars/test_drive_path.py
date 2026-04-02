@@ -370,6 +370,7 @@ def drive_path(
                                     y=float(pose_world.y),
                                     theta=float(leg_theta),
                                 ))
+                        motor.set_steering(steer_deg) #steer_deg
                         follower.sync_to_motor_steering()
 
                 if pivot_active:
