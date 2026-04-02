@@ -60,7 +60,7 @@ def classify_MVP(phrase):
     match = re.compile(r"\b(" + "|".join(SHAPES.keys()) + r")s?\b", re.IGNORECASE).search(phrase)
     return match.group(1).lower() if match else "No match"
 
-if os.uname().nodename=='strawberry':
+if os.uname().nodename=='lugnut':
     from sentence_transformers import SentenceTransformer
     model = SentenceTransformer("all-MiniLM-L6-v2")
     phrase_to_vec = load_or_build_phrase_embeddings()
@@ -68,3 +68,7 @@ if os.uname().nodename=='strawberry':
 
     CENTROID_MATRIX = np.vstack(list(shape_centroids.values()))
     CENTROID_LABELS = np.array(list(shape_centroids.keys()))
+
+# while True:
+#     i = input('en')
+#     print(classify(i))

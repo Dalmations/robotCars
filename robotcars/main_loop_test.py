@@ -80,7 +80,7 @@ def leader_main():
         finally:
             motor.stop()
 
-if IDENTITY=='strawberry':
+if IDENTITY=='lugnut':
     leader_main()
 else:
     follower_main()

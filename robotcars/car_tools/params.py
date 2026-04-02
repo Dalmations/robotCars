@@ -1,5 +1,5 @@
 PARAMS = {
-    'strawberry': {
+    'lugnut': {
         'circle': {
             'steering':30,
             'forward_for': 10,
@@ -17,7 +17,7 @@ PARAMS = {
             'speed':80
         }
     },
-    'pongo': {
+    'squeaky': {
         'circle': {
             'steering':15,
             'forward_for': 10,
@@ -35,7 +35,7 @@ PARAMS = {
             'speed':80
         }
     },
-    'raspberry': {
+    'lucky': {
         'circle': {
             'steering':13,
             'forward_for': 9,
