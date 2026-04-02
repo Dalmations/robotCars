@@ -44,7 +44,15 @@ PARAMS = {
             'wheelbase':2.0,
             'pivot_turn_heading_deg': 45.0,
             'straight':True,
-            'pivot_turn_deg_per_s': 0.5
+            'pivot_turn_deg_per_s': 0.5,
+            'distance_scale': 0.2,
+        },
+        'hexagon': {
+            'wheelbase':2.0,
+            'pivot_turn_heading_deg': 30.0,
+            'straight':True,
+            'pivot_turn_deg_per_s': 0.5,
+            'distance_scale': 0.2,
         }
     },
     'blueberry': {

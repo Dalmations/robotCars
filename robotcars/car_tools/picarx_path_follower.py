@@ -57,6 +57,8 @@ class FollowerConfig:
     pivot_turn_deg_per_s: float = 12.0
     pivot_turn_cells_per_deg: float = 0.05
 
+    distance_scale: float = 1.0                # Tune to convert speed to grid units
+
 
 class PurePursuitFollower:
     """
@@ -155,10 +157,16 @@ class PurePursuitFollower:
     def update_params(self, shape):
         self.shape = shape
         if shape in self.params:
-            self.cfg.wheelbase = self.params[shape]['wheelbase']
-            self.cfg.pivot_turn_heading_deg = self.params[shape]['pivot_turn_heading_deg']
-            self.cfg.straight = self.params[shape]['straight']
-            self.cfg.pivot_turn_deg_per_s = self.params[shape]['pivot_turn_deg_per_s']
+            if self.params[shape]['wheelbase']:
+                self.cfg.wheelbase = self.params[shape]['wheelbase']
+            if self.params[shape]['pivot_turn_heading_deg']:
+                self.cfg.pivot_turn_heading_deg = self.params[shape]['pivot_turn_heading_deg']
+            if self.params[shape]['straight']:
+                self.cfg.straight = self.params[shape]['straight']
+            if self.params[shape]['pivot_turn_deg_per_s']:
+                self.cfg.pivot_turn_deg_per_s = self.params[shape]['pivot_turn_deg_per_s']
+            if self.params[shape]['distance_scale']:
+                self.cfg.distance_scale = self.params[shape]['distance_scale']
 
     # -------------------------
     # Pure Pursuit math
@@ -398,4 +406,4 @@ class PurePursuitFollower:
         ref_step = tick_count / 5.0
         speed_ref = max(1.0, float(speed_ref))
         speed_cmd = float(max(0, min(100, int(speed))))
-        return ref_step * (speed_cmd / speed_ref)
+        return ref_step * (speed_cmd / speed_ref) * self.cfg.distance_scale
