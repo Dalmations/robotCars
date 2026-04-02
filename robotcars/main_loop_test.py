@@ -61,10 +61,10 @@ def leader_main():
                continue
             shape, robots = handle_input(phrase)
             if shape not in SHAPES:
-                display_text(f'Try again\n{phrase}')
+                display_text(f'Try again! Received: {phrase}')
                 continue
             else:
-                display_text(shape)
+                display_text('processing ' + shape + '...')
             if not robots:
                 fc.publish_broadcast({'message':shape})
             else:
@@ -75,6 +75,7 @@ def leader_main():
             except Exception:
                 continue
             drive_in_shape(shape, motor)
+            display_text(shape + ' completed!')
             motor.stop()
         finally:
             motor.stop()

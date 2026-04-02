@@ -7,13 +7,18 @@ SHAPES = {
         "no edges or vertices",
         "circle",
         'drive in a cirlce',
-        'drive in a circular motion'
+        'drive in a circular motion',
+        'please drive in a circle',
+        'please drive around in a cirlce',
+        'drive around with a circular motion'
     ],
     "hexagon": [
         "hexagon",
         'drive in a hexagon',
         'a shape with six sides',
-        'six sided polygon'
+        'six sided polygon',
+        'please drive in a hexagon',
+        'please drive around in a hexagon'
     ],
     "pentagon": [
         "a shape with five sides",
@@ -28,7 +33,9 @@ SHAPES = {
         'a shape with four sides',
         'four sided polygon',
         'a shape with four right angles',
-        'a square figure'
+        'a square figure',
+        'please drive around in a square',
+        'please drive in a square'
     ],
     "triangle": [
         "a shape with three sides",

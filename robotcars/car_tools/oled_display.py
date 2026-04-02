@@ -50,6 +50,7 @@ def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[s
 
 
 def display_text(text: str, font_size: int = FONT_SIZE):
+    text.capitalize()
     device = get_device()
 
     # Try to load a nicer font; fall back to PIL default
