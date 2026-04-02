@@ -280,7 +280,7 @@ def drive_path(
     timeout_s: float = 180.0,
 ) -> bool:
     if path is None or len(path.waypoints) < 2:
-        raise ValueError("drive_path requires a Path with at least two waypoints")
+        return False
     
     # pose_estimator, frame_provider = build_visual_test_stack(shared_map)
 
@@ -371,7 +371,6 @@ def drive_path(
                                     theta=float(leg_theta),
                                 ))
                         motor.set_steering(0) #steer_deg
-                        drive_speed = int(motor.cfg.speed)
                         odom_step_cells = 0.0
                         odom_steer_deg = motor.get_applied_steering_deg()
                         follower.sync_to_motor_steering()
