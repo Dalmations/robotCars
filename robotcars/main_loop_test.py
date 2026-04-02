@@ -84,7 +84,14 @@ def build_follower(motor: MotorController) -> PurePursuitFollower:
         steer_rate_limit_deg_per_tick=12.0,       # max steer change
         dock_distance_grid=8.0,                   # near goal threshold
         dock_min_lookahead_grid=1.5,              # minimum dock lookahead
-        straight = True,                          # Go straight during tracking commands
+        straight = True,                          # snap heading error to 0 after pivots
+
+        pivot_turn_heading_deg = 45.0,
+        pivot_turn_exit_deg = 20.0,
+        pivot_turn_steer_deg = 30.0,
+        pivot_turn_settle_s = 0.12,
+        pivot_turn_deg_per_s = 12.0,
+        pivot_turn_cells_per_deg = 0.05,
     ), PARAMS[IDENTITY])
     return follower
 
