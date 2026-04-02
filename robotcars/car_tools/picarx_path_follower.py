@@ -50,6 +50,13 @@ class FollowerConfig:
     dock_min_lookahead_grid: float = 6.0       # minimum dock lookahead
     straight: bool = False
 
+    pivot_turn_heading_deg: float = 45.0
+    pivot_turn_exit_deg: float = 20.0
+    pivot_turn_steer_deg: float = 30.0
+    pivot_turn_settle_s: float = 0.12
+    pivot_turn_deg_per_s: float = 12.0
+    pivot_turn_cells_per_deg: float = 0.05
+
 
 class PurePursuitFollower:
     """
@@ -149,6 +156,9 @@ class PurePursuitFollower:
         self.shape = shape
         if shape in self.params:
             self.cfg.wheelbase = self.params[shape]['wheelbase']
+            self.cfg.pivot_turn_heading_deg = self.params[shape]['pivot_turn_heading_deg']
+            self.cfg.straight = self.params[shape]['straight']
+            self.cfg.pivot_turn_deg_per_s = self.params[shape]['pivot_turn_deg_per_s']
 
     # -------------------------
     # Pure Pursuit math

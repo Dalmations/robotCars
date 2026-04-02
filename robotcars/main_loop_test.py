@@ -41,7 +41,10 @@ PARAMS = {
             'pivot_turn_heading_deg': 90.0
         },
         'square': {
-            'straight':True
+            'wheelbase':2.0,
+            'pivot_turn_heading_deg': 45.0,
+            'straight':True,
+            'pivot_turn_deg_per_s': 0.5
         }
     },
     'blueberry': {
@@ -50,7 +53,10 @@ PARAMS = {
             'pivot_turn_heading_deg': 90.0
         },
         'square': {
-            'straight':True
+            'wheelbase':2.0,
+            'pivot_turn_heading_deg': 45.0,
+            'straight':True,
+            'pivot_turn_deg_per_s': 0.5
         }
     },
     'raspberry': {
@@ -59,7 +65,10 @@ PARAMS = {
             'pivot_turn_heading_deg': 90.0
         },
         'square': {
-            'straight':True
+            'wheelbase':2.0,
+            'pivot_turn_heading_deg': 45.0,
+            'straight':True,
+            'pivot_turn_deg_per_s': 0.5
         }
     }
 }
