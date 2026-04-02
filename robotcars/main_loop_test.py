@@ -29,14 +29,17 @@ class FollowerClient(MQTTClient):
 IDENTITY = os.uname().nodename
 
 def follower_main():
-    fc = FollowerClient(IDENTITY, "192.168.4.1")
-    fc.start() 
+    #fc = FollowerClient(IDENTITY, "192.168.4.1")
+    #fc.start() 
     motor = MotorController(MotorConfig(speed=80))
     while True:
         try:
-            msg = fc.message_q.get()
-            fc.busy.set()
-            shape = msg['message']
+            #msg = fc.message_q.get()
+            #fc.busy.set()
+            i = input('1 for circle, 2 for square, 3 for hexagon')
+            s = {'1':'circle', '2':'square','3':'hexagon'}
+            #shape = msg['message']
+            shape = s[i]
             drive_in_shape(shape, motor)
             motor.stop()
         finally:

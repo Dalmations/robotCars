@@ -21,7 +21,7 @@ PARAMS = {
         },
         'square': {
             'forward_for':4,
-            'backward_for': 1.6
+            'backward_for': 1.5
         },
         'hexagon': {
             'forward_for':4,
@@ -31,16 +31,16 @@ PARAMS = {
     },
     'pongo': {
         'circle': {
-            'steering':30,
+            'steering':20,
             'forward_for': 10
         },
         'square': {
-            'forward_for':4,
+            'forward_for':3,
             'backward_for': 1.6
         },
         'hexagon': {
-            'forward_for':4,
-            'motor_speed':-20,
+            'forward_for':1.5,
+            'motor_speed':0,
             'sleep':1
         }
     },

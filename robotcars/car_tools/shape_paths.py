@@ -14,6 +14,7 @@ def drive_in_shape(shape, motor):
 			for i in range(4):
 				motor.set_steering(0)
 				motor.forward_for(params['forward_for'])
+				motor.stop()
 				motor.set_steering(-90)
 				motor.backward_for(params['backward_for'])
 				motor.stop()
@@ -22,8 +23,10 @@ def drive_in_shape(shape, motor):
 			for i in range(6):
 				motor.set_steering(0)
 				motor.forward_for(params['forward_for'])
-				motor.set_steering(-90)
-				motor.px.set_motor_speed(2, params['motor_speed'])
+				motor.stop()
+				time.sleep(0.05)
+				motor.px.set_motor_speed(1, 80)
+				motor.px.set_motor_speed(2, 80)
 				time.sleep(params['sleep'])
 				motor.stop()
 				motor.set_steering(0)
