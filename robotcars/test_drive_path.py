@@ -421,7 +421,7 @@ def drive_path(
                     )
                 follower.integrate_dead_reckoning(
                     shared_map=shared_map,
-                    forward_step=forward_step,
+                    forward_step=odom_step_cells,
                     yaw_delta=yaw_delta,
                 )
                 # _maybe_apply_visual_correction(
