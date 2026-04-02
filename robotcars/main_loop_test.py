@@ -39,18 +39,27 @@ PARAMS = {
         'circle': {
             'wheelbase':2.0,
             'pivot_turn_heading_deg': 90.0
+        },
+        'square': {
+            'straight':True
         }
     },
     'blueberry': {
         'circle': {
             'wheelbase':2.5,
             'pivot_turn_heading_deg': 90.0
+        },
+        'square': {
+            'straight':True
         }
     },
     'raspberry': {
         'circle': {
             'wheelbase':2.5,
             'pivot_turn_heading_deg': 90.0
+        },
+        'square': {
+            'straight':True
         }
     }
 }
@@ -58,7 +67,7 @@ PARAMS = {
 def build_follower(motor: MotorController) -> PurePursuitFollower:
     follower = PurePursuitFollower(motor, FollowerConfig(
         lookahead=5.0,                            # pure pursuit lookahead distance
-        wheelbase=1.0,                           # front to back wheel wheelbase
+        wheelbase=1.0,                            # front to back wheel wheelbase
         goal_tolerance=0.6,                       # goal reached radius
         steer_sign=1.0,                           # follower steering sign
         steer_alpha=0.25,                         # steering smoother
@@ -66,6 +75,7 @@ def build_follower(motor: MotorController) -> PurePursuitFollower:
         steer_rate_limit_deg_per_tick=12.0,       # max steer change
         dock_distance_grid=8.0,                   # near goal threshold
         dock_min_lookahead_grid=1.5,              # minimum dock lookahead
+        straight = True                           # Go straight during tracking commands
     ), PARAMS[IDENTITY])
     return follower
 

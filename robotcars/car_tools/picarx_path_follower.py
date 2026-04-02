@@ -48,6 +48,7 @@ class FollowerConfig:
 
     dock_distance_grid: float = 12.0           # near goal threshold
     dock_min_lookahead_grid: float = 6.0       # minimum dock lookahead
+    straight = False
 
 
 class PurePursuitFollower:

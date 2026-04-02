@@ -391,12 +391,13 @@ def drive_path(
                 d_goal,
                 steer_cap_deg=follower.cfg.max_steer_deg,
             )
-            motor.set_steering(0) #steer_deg
+
+            motor.set_steering(0 if follower.cfg.straight else steer_deg) #steer_deg
 
             drive_mode = "track"
             drive_speed = int(motor.cfg.speed)
             odom_step_cells = 0.0
-            odom_steer_deg = motor.get_applied_steering_deg()
+            odom_steer_deg = steer_deg if follower.cfg.straight else motor.get_applied_steering_deg()
 
             if latest_ultra_cm is not None and latest_ultra_cm <= float(loop_cfg.ultra_stop_cm):
                 motor.stop()
