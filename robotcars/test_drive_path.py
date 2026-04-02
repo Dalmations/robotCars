@@ -358,7 +358,7 @@ def drive_path(
                         # Set heading error to 0 if straight (perfect pivot calibration)
                         if follower.cfg.straight and current_wp_idx > 0:
                             prev_wp = path.waypoints[current_wp_idx - 1]
-                            active_wp = path.waypoints[current_wp_idx]
+                            wp_world_x, wp_world_y = shared_map.grid_to_world_f(prev_wp.x, prev_wp.y)
                             leg_theta = math.atan2(
                                 float(active_wp.y) - float(prev_wp.y),
                                 float(active_wp.x) - float(prev_wp.x),
@@ -366,8 +366,8 @@ def drive_path(
                             pose_world = shared_map.get_pose(frame="world")
                             if pose_world is not None:
                                 shared_map.set_pose(Pose(
-                                    x=float(prev_wp.x),
-                                    y=float(prev_wp.y),
+                                    x=float(wp_world_x),
+                                    y=float(wp_world_y),
                                     theta=float(leg_theta),
                                 ))
                             steer_deg = 0.0
