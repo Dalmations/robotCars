@@ -17,6 +17,7 @@ def drive_in_shape(shape, motor:MotorController):
 				motor.set_steering(0)
 				motor.forward_for(params['forward_for'])
 				motor.stop()
+				time.sleep(0.25)
 				motor.set_steering(-90)
 				motor.backward_for(params['backward_for'])
 				motor.stop()

@@ -1,14 +1,14 @@
 PARAMS = {
     'lugnut': {
         'circle': {
-            'steering':30,
+            'steering':14,
             'forward_for': 10,
             'speed':80
         },
         'square': {
-            'forward_for':4,
-            'backward_for': 1.6,
-            'speed':80
+            'forward_for':3,
+            'backward_for': 1.3,
+            'speed':40
         },
         'hexagon': {
             'forward_for':4,

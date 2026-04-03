@@ -6,6 +6,8 @@ from speech_input.shapes import SHAPES
 
 EMBEDDING_FILE = "robotcars/speech_input/shape_embeddings.pkl"
 THRESHOLD = 0.58
+model_path = '/home/strawberry/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/c9745ed1d9f207416be6d2e6f8de32d1f16199bf'
+
 
 def embed(texts):
     return model.encode(texts, normalize_embeddings=True)
@@ -62,7 +64,7 @@ def classify_MVP(phrase):
 
 if os.uname().nodename=='lugnut':
     from sentence_transformers import SentenceTransformer
-    model = SentenceTransformer("all-MiniLM-L6-v2")
+    model = SentenceTransformer(model_path, local_files_only=True)
     phrase_to_vec = load_or_build_phrase_embeddings()
     shape_centroids = build_centroids(phrase_to_vec)
 
