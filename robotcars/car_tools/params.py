@@ -3,7 +3,7 @@ PARAMS = {
         'circle': {
             'steering':14,
             'forward_for': 10,
-            'speed':80
+            'speed':40
         },
         'square': {
             'forward_for':3,
@@ -11,10 +11,9 @@ PARAMS = {
             'speed':40
         },
         'hexagon': {
-            'forward_for':4,
-            'motor_speed':-20,
-            'sleep':1,
-            'speed':80
+            'forward_for':1,
+            'speed':40,
+            'turn_time':0.9
         }
     },
     'squeaky': {
